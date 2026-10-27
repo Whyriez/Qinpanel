@@ -85,6 +85,7 @@ fn provider(value: &Value, hostname: &str) -> Result<(String, String, String), E
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Generate {
+    #[schema(value_type = String, format = "uuid")]
     pub request_id: uuid::Uuid,
     pub expected_revision: i64,
     pub hostname: String,
@@ -429,6 +430,33 @@ mod tests {
     use panel_core::object_storage::identity::StorageEndpoint;
     use panel_proto::{S3Credentials, StorageSecretRequest};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn generation_keeps_typed_uuid_validation_despite_string_openapi_schema() {
+        let id = uuid::Uuid::new_v4();
+        let input = json!({"request_id":id,"expected_revision":1,"hostname":"storage.example.test","email":"admin@example.test","confirmed":true});
+        let parsed: Generate = serde_json::from_value(input.clone()).expect("valid request");
+        assert_eq!(parsed.request_id, id);
+        assert!(validate(&parsed).is_ok());
+        for invalid in [
+            json!("not-a-uuid"),
+            json!(""),
+            Value::Null,
+            json!(123),
+            json!({"value":id}),
+        ] {
+            let mut candidate = input.clone();
+            candidate["request_id"] = invalid;
+            assert!(serde_json::from_value::<Generate>(candidate).is_err());
+        }
+        let mut nil = input.clone();
+        nil["request_id"] = json!(uuid::Uuid::nil());
+        let parsed: Generate = serde_json::from_value(nil).expect("UUID syntax");
+        assert!(validate(&parsed).is_err());
+        let mut extra = input;
+        extra["path"] = json!("/tmp/arbitrary");
+        assert!(serde_json::from_value::<Generate>(extra).is_err());
+    }
 
     #[derive(Default)]
     struct Runtime {
