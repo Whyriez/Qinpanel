@@ -1,0 +1,183 @@
+name: Qinpanel release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag rilis sesuai Cargo.toml (development: v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+      publish:
+        description: 'Publikasikan paket ke Supabase dan GitHub Release'
+        type: boolean
+        default: false
+      artifact_run_id:
+        description: 'Opsional: ID run build sebelumnya untuk melanjutkan publish tanpa rebuild'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  QONPANEL_RELEASE_BASE_URL: ${{ vars.QONPANEL_RELEASE_BASE_URL || 'https://download.arelqon.com/qonpanel' }}
+
+jobs:
+  security-checks:
+    if: ${{ !inputs.artifact_run_id }}
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      actions: read
+  platforms:
+    if: ${{ !inputs.artifact_run_id }}
+    uses: ./.github/workflows/platform-compatibility.yml
+  build-release:
+    permissions:
+      contents: read
+      actions: read
+    needs: [security-checks]
+    if: ${{ !inputs.artifact_run_id }}
+    name: Build Qinpanel (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    # Compile against the oldest supported libc (AlmaLinux 9), on native CPUs.
+    container:
+      image: almalinux:9
+    env:
+      CARGO_TARGET_DIR: target/release-native/${{ matrix.target }}
+      CARGO_INCREMENTAL: '0'
+      RELEASE_TARGET: ${{ matrix.target }}
+      RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+
+    steps:
+      - name: Install native release prerequisites
+        run: dnf -y install git gcc gcc-c++ make perl python3 pkgconf-pkg-config openssl-devel tar gzip xz unzip which findutils diffutils binutils
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Validate release version
+        run: bash scripts/package-release.sh "$RELEASE_TARGET" "$RELEASE_VERSION" --check-version
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependency sources only
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: release-native-glibc234-v2
+          key: ${{ matrix.target }}
+          cache-targets: 'false'
+          cache-bin: 'false'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Compile release binaries
+        run: bash scripts/compile-release.sh "$RELEASE_TARGET"
+
+      - name: Verify supported GLIBC baseline
+        run: |
+          bash scripts/check-glibc.sh "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/panel-api" "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/panel-agent" "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/panelctl"
+
+      - name: Package tarball and checksum
+        run: |
+          bash scripts/package-release.sh "$RELEASE_TARGET" "$RELEASE_VERSION"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: qinpanel-${{ matrix.target }}
+          path: |
+            release/*.tar.gz
+            release/*.sha256
+
+  publish-release:
+    name: Publish Qinpanel release
+    needs: [build-release, platforms, security-checks]
+    if: ${{ always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.artifact_run_id != '') || (needs.build-release.result == 'success' && needs.platforms.result == 'success' && needs.security-checks.result == 'success')) }}
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: qonpanel-distribution-publication
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Validate original artifact run
+        if: inputs.artifact_run_id != ''
+        id: original
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid source run ID'; exit 1; }
+          source_sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq 'select(.path == ".github/workflows/release.yml" and .status == "completed") | .head_sha')"
+          [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]] || { echo 'Use a completed Qinpanel release run from this repository'; exit 1; }
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?filter=all&per_page=100" > "$RUNNER_TEMP/release-source-jobs.json"
+          python3 scripts/verify-release-jobs.py "$RUNNER_TEMP/release-source-jobs.json"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          run-id: ${{ inputs.artifact_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Prepare release files and unified SHA256SUMS
+        run: |
+          mkdir -p dist
+          find artifacts -name "*.tar.gz" -exec cp {} dist/ \;
+          set -o pipefail
+          find artifacts -name "*.sha256" -exec cat {} + | LC_ALL=C sort -k2,2 > dist/SHA256SUMS
+
+      - name: Publish verified distribution to Supabase
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        env:
+          RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL || 'https://rrewfkbaipgbvakaekcy.supabase.co' }}
+          SUPABASE_BUCKET: ${{ vars.SUPABASE_BUCKET || 'qonpanel-releases' }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python3 scripts/publish-distribution.py --directory dist --tag "$RELEASE_VERSION" --github-directory github-dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        with:
+          files: |
+            github-dist/*
+          name: Qinpanel ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          target_commitish: ${{ steps.original.outputs.source_sha || github.sha }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          generate_release_notes: true

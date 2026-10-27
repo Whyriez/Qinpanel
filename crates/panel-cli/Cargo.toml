@@ -1,0 +1,33 @@
+[package]
+name = "panel-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "panelctl"
+path = "src/main.rs"
+
+[dependencies]
+panel-core = { workspace = true }
+panel-proto = { workspace = true }
+panel-db = { workspace = true }
+clap = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+mimalloc = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

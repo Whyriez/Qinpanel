@@ -1,0 +1,17 @@
+.connectivity-summary { border-top: 1px solid var(--line); }
+.connectivity-service { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(0, 4fr); gap: 16px 28px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+.connectivity-service > h3 { grid-column: 1; }
+.connectivity-service > :not(h3) { grid-column: 2; }
+.connectivity-endpoint { min-width: 0; display: grid; gap: 12px; }
+.connectivity-endpoint + .connectivity-endpoint { border-top: 1px solid var(--line); padding-top: 16px; }
+.connectivity-endpoint > button { justify-self: start; }
+.connectivity-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; border: 0; padding: 0; margin: 0; }
+.connectivity-fields > :is(label, .connectivity-field) { min-width: 0; display: grid; align-content: start; gap: 6px; }
+.connectivity-fields > .connectivity-check { display: flex; align-items: center; gap: 8px; }
+[data-testid='connectivity-settings'] :is(.button-primary, .button-secondary):disabled,
+.connectivity-editor :is(button, input, select):disabled { opacity: .55; cursor: not-allowed; }
+@media (max-width: 640px) {
+  .connectivity-service { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .connectivity-service > :not(h3) { grid-column: 1; }
+  .connectivity-fields { grid-template-columns: minmax(0, 1fr); }
+}

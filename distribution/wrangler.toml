@@ -1,0 +1,9 @@
+name = "qonpanel-downloads"
+main = "worker.mjs"
+compatibility_date = "2026-10-26"
+workers_dev = false
+
+routes = [{ pattern = "download.arelqon.com", custom_domain = true }]
+
+[vars]
+SUPABASE_PUBLIC_BASE_URL = "https://rrewfkbaipgbvakaekcy.supabase.co/storage/v1/object/public/qonpanel-releases"

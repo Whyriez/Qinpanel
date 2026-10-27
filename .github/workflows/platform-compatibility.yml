@@ -1,0 +1,48 @@
+name: Linux platform compatibility
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  packages:
+    name: Packages and backup (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12', 'almalinux:9', 'almalinux:10']
+    env:
+      QONPANEL_DISPOSABLE_CI: '1'
+    steps:
+      - name: Bootstrap container tools
+        run: |
+          if command -v dnf >/dev/null; then
+            dnf -y install git tar gzip python3 gcc gcc-c++ make pkgconf-pkg-config
+            # Keep the curl provider from the base image (curl or curl-minimal).
+            if ! command -v curl >/dev/null; then
+              dnf -y install curl-minimal
+            fi
+          else
+            apt-get update -qq
+            apt-get install -y --no-install-recommends git curl ca-certificates python3 gcc g++ make pkg-config
+          fi
+      - uses: actions/checkout@v5
+      - name: Check real distribution packages and file layout
+        shell: bash
+        run: bash scripts/tests/platform-packages-ci.sh
+      - name: Install Rust toolchain for native configuration checks
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust sources without cross-distribution build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: platform-native-sources-v1
+          key: ${{ matrix.image }}
+          cache-targets: 'false'
+          cache-bin: 'false'
+      - name: Check generated mail configuration with native vendor tools
+        shell: bash
+        run: cargo test --locked -p panel-agent email::tests::native_email_configuration_syntax -- --ignored --exact

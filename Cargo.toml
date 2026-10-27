@@ -1,0 +1,128 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/panel-core",
+    "crates/panel-proto",
+    "crates/panel-api",
+    "crates/panel-agent",
+    "crates/panel-db",
+    "crates/panel-webserver",
+    "crates/panel-runtime",
+    "crates/panel-fs",
+    "crates/panel-analytics",
+    "crates/panel-cli",
+    "tests/isolation",
+]
+exclude = ["vendor/utoipa-swagger-ui"]
+
+# Temporary security backport until upstream Swagger UI supports zip >= 9.
+# Local patch notes: docs/vendor/utoipa-swagger-ui/QPANEL-PATCH.md (not published).
+[patch.crates-io]
+utoipa-swagger-ui = { path = "vendor/utoipa-swagger-ui" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Qinpanel Contributors"]
+repository = "https://github.com/Whyriez/Qinpanel"
+
+[workspace.dependencies]
+# Internal workspace crates
+panel-core = { path = "crates/panel-core", version = "0.1.0" }
+panel-proto = { path = "crates/panel-proto", version = "0.1.0" }
+panel-api = { path = "crates/panel-api", version = "0.1.0" }
+panel-agent = { path = "crates/panel-agent", version = "0.1.0" }
+panel-db = { path = "crates/panel-db", version = "0.1.0" }
+panel-webserver = { path = "crates/panel-webserver", version = "0.1.0" }
+panel-runtime = { path = "crates/panel-runtime", version = "0.1.0" }
+panel-fs = { path = "crates/panel-fs", version = "0.1.0" }
+panel-analytics = { path = "crates/panel-analytics", version = "0.1.0" }
+
+# Async & Networking
+tokio = { version = "1.53.3", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", features = ["sink"] }
+bytes = "1.10"
+http-body-util = "0.1"
+hyper = { version = "1.11", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+
+# Serialization & OpenAPI
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+utoipa = { version = "5.3", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.13", features = ["v4", "serde"] }
+
+# Security & Auth
+argon2 = "0.5"
+bcrypt = "0.17"
+rand_core = { version = "0.6", features = ["getrandom"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+quick-xml = { version = "=0.41.0", features = ["serialize"] }
+md-5 = "0.10"
+base64 = "0.22"
+totp-rs = { version = "5.6", features = ["gen_secret", "qr"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Logging & Errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2.0"
+
+# Embed assets
+rust-embed = { version = "8.6", features = ["interpolate-folder-path"] }
+mime_guess = "2.0"
+
+# Utilities
+tempfile = "3.17"
+idna = "1.0"
+minijinja = "2.7"
+rcgen = "0.14"
+x509-parser = "0.18"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8"
+instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "ring", "rcgen", "time", "x509-parser"] }
+time = "0.3"
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+libc = "0.2"
+mimalloc = { version = "0.1", default-features = false }
+
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+clone_on_ref_ptr = "warn"
+cognitive_complexity = "warn"
+
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+

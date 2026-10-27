@@ -1,0 +1,48 @@
+[Unit]
+Description=Qinpanel Management API Service
+Documentation=https://github.com/Whyriez/Qinpanel
+After=network.target panel-agent.service
+Wants=panel-agent.service
+
+[Service]
+Type=simple
+User=panel-api
+Group=panel
+Environment=PANEL_DB_PATH=/var/lib/panel/panel.db
+Environment=PANEL_ANALYTICS_DB_PATH=/var/lib/panel/analytics.db
+Environment=PANEL_LISTEN_ADDR=127.0.0.1:7700
+Environment=PANEL_ENVIRONMENT=production
+Environment=PANEL_PUBLIC_SCHEME=http
+UMask=0027
+ExecStart=/usr/local/bin/panel-api
+Restart=always
+RestartSec=5s
+KillMode=process
+LimitNOFILE=65535
+
+# Systemd Security Hardening (systemd-analyze security target: score < 2.0 OK)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_RAWIO CAP_NET_ADMIN
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# Working & Runtime directories
+WorkingDirectory=/var/lib/panel
+ReadWritePaths=/var/lib/panel
+StateDirectory=panel
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

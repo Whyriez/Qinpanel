@@ -1,0 +1,76 @@
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./fonts.css";
+@import "./console.css";
+@import "./motion.css";
+@import "./command-palette.css";
+@import "./site-overview.css";
+@import "./account-access.css";
+@import "./audit.css";
+@import "./connectivity.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-slate-50: #f8fafb;
+  --color-slate-100: #f2f5f7;
+  --color-slate-200: #e0e5e9;
+  --color-slate-300: #c7d0d7;
+  --color-slate-400: #8f9ea9;
+  --color-slate-500: #5d6d79;
+  --color-slate-600: #465965;
+  --color-slate-700: #344651;
+  --color-slate-800: #24343e;
+  --color-slate-900: #172127;
+  --color-slate-950: #10171c;
+  --color-indigo-50: #eef6f6;
+  --color-indigo-100: #d9eeef;
+  --color-indigo-200: #b5dcdf;
+  --color-indigo-300: #89c9ce;
+  --color-indigo-400: #4ca7af;
+  --color-indigo-500: #228a95;
+  --color-indigo-600: #087681;
+  --color-indigo-700: #065e67;
+  --color-indigo-800: #094b53;
+  --color-indigo-900: #103d44;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  line-height: 1.5;
+  font-size: 14px;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+code, pre, kbd {
+  font-family: var(--font-mono);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-muted);
+}

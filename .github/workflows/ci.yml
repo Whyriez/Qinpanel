@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  managed-storage:
+    uses: ./.github/workflows/managed-storage.yml
+  platforms:
+    uses: ./.github/workflows/platform-compatibility.yml
+  backend:
+    name: Backend (Rust)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: /tmp/Qinpanel
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Free runner disk space
+        working-directory: /tmp
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+
+      - name: Install mold linker
+        working-directory: /tmp
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Prepare Qinpanel build directory
+        working-directory: ${{ github.workspace }}
+        run: |
+          test ! -e /tmp/Qinpanel
+          cp -a "$GITHUB_WORKSPACE/." /tmp/Qinpanel
+          test "$(git -C /tmp/Qinpanel rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: qinpanel-backend-v1
+          workspaces: /tmp/Qinpanel -> target
+
+      - name: Managed storage lifecycle and upgrade fixtures
+        run: |
+          python3 scripts/tests/object-storage-worker-test.py
+          python3 scripts/tests/managed-storage-migration-test.py
+          python3 scripts/tests/storage-tls-migration-test.py
+
+      - name: Ensure web dist directory exists
+        run: |
+          mkdir -p web/dist
+          cp web/index.html web/dist/index.html
+          cp web/public/panel-url-check.css web/dist/panel-url-check.css
+
+      - name: Qinpanel branding upgrade preserves customer SMTP and templates
+        run: python3 scripts/tests/qinpanel-branding-test.py
+
+      - name: Keep local documentation out of Git
+        run: python3 scripts/tests/documentation-policy-test.py
+
+      - name: AI upgrade schema and atomic usage budget (temporary SQLite)
+        run: python3 scripts/tests/ai-migration-test.py
+
+      - name: S3 storage upgrade, tenant scope and atomic transfer SQL
+        run: python3 scripts/tests/storage-migration-test.py
+
+      - name: Private repository distribution publication fixtures
+        run: python3 scripts/tests/distribution-publish-test.py
+
+      - name: Release artifact security evidence fixtures
+        run: python3 scripts/tests/release-security-gate-test.py
+
+      - name: Check formatting (rustfmt)
+        run: cargo fmt --check
+
+      - name: Qinpanel CI workspace and output contracts
+        run: bash scripts/tests/ci-branding-test.sh
+
+      - name: Installer regression checks (mocks, no host services)
+        run: bash scripts/tests/install-regression-test.sh
+
+      - name: Full server backup fixtures and real GnuPG encryption (temporary files)
+        run: |
+          command -v gpg >/dev/null || sudo apt-get install -y gpg
+          python3 scripts/tests/server-backup-test.py
+          python3 scripts/tests/server-backup-crypto-test.py
+          python3 scripts/tests/platform-support-test.py
+          python3 scripts/tests/mail-auth-test.py
+
+      - name: SQLite partition SQL contracts (temporary databases)
+        run: python3 scripts/tests/sqlite-partition-regression.py
+
+      - name: Backup Tasks observation SQL contracts (temporary databases)
+        run: python3 scripts/tests/server-backup-tasks-test.py
+
+      - name: Agent Netlink sandbox acceptance (isolated network, no firewall changes)
+        run: sudo env GITHUB_ACTIONS=true QONPANEL_DISPOSABLE_CI=1 python3 scripts/tests/agent-netlink-native-test.py
+
+      - name: Run Clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::unwrap_used -A clippy::expect_used -A clippy::clone_on_ref_ptr && cargo clippy --workspace --lib --bins -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Native file-worker jail and privilege-drop acceptance
+        run: |
+          cargo test -p panel-agent --test fs_worker_isolation_native_test --no-run --message-format=json > "$RUNNER_TEMP/fs-worker-artifact.jsonl"
+          test_binary=$(python3 -c 'import json,sys; rows=(json.loads(line) for line in open(sys.argv[1], encoding="utf-8")); print(next(row["executable"] for row in rows if row.get("reason")=="compiler-artifact" and row.get("target",{}).get("name")=="fs_worker_isolation_native_test" and row.get("executable")))' "$RUNNER_TEMP/fs-worker-artifact.jsonl")
+          test -n "$test_binary"
+          sudo "$test_binary" --ignored --test-threads=1
+
+      - name: Reject activation of the unpatched RSA dependency
+        run: |
+          cargo tree --workspace --all-features --prefix none > "$RUNNER_TEMP/security-dependency-tree.txt"
+          if grep -Eq '^rsa v' "$RUNNER_TEMP/security-dependency-tree.txt"; then
+            echo "RUSTSEC-2023-0071 is active; remove the unnecessary RSA dependency before release."
+            exit 1
+          fi
+
+      - name: Install cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  frontend:
+    name: Frontend (React & TypeScript)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install npm dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Audit frontend dependencies
+        working-directory: web
+        run: npm audit --audit-level=low
+
+      - name: Download domain proxy fixtures
+        run: node --test scripts/tests/distribution-worker.test.mjs
+
+      - name: Install isolated Cloudflare runtime for proxy tests
+        run: npm install --prefix "$RUNNER_TEMP/qonpanel-worker-runtime" --no-audit --no-fund miniflare@5.20261019.2-beta
+
+      - name: Download proxy in the real workerd runtime (no provider network)
+        env:
+          NODE_PATH: ${{ runner.temp }}/qonpanel-worker-runtime/node_modules
+        run: node --test scripts/tests/distribution-workerd-test.cjs
+
+      - name: Typecheck (tsc)
+        working-directory: web
+        run: npm run check
+
+      - name: Lint (eslint)
+        working-directory: web
+        run: npm run lint
+
+      - name: Run frontend unit tests
+        working-directory: web
+        run: npm test -- --run
+
+      - name: Build frontend production bundle
+        working-directory: web
+        run: npm run build

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="id">
+<!-- {{font_license}} -->
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>{{domain}} · Situs baru</title>
+    <style>
+        @font-face {
+            font-family: 'Plus Jakarta Sans';
+            src: url('data:font/woff2;base64,{{font}}') format('woff2');
+            font-weight: 400 700;
+            font-style: normal;
+            font-display: swap;
+        }
+        :root {
+            color-scheme: light;
+            --bg: #f5f6f8;
+            --surface: #fff;
+            --ink: #18262f;
+            --muted: #5d6d79;
+            --line: #e0e5e9;
+            --primary: #087681;
+            --success: #23764f;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            min-height: 100svh;
+            background: var(--bg);
+            color: var(--ink);
+            font: 400 14px/1.7 'Plus Jakarta Sans', system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+        .wrap { width: min(100% - 64px, 1040px); margin-inline: auto; }
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding-block: 28px;
+            border-bottom: 1px solid var(--line);
+        }
+        .brand { display: inline-flex; align-items: center; gap: 10px; font-size: 19px; font-weight: 700; }
+        .mark { width: 29px; height: 29px; color: var(--primary); }
+        .header-note, footer { color: var(--muted); font-size: 12px; }
+        main { flex: 1; display: grid; align-content: center; padding-block: 88px; }
+        .intro { max-width: 760px; }
+        .status { display: inline-flex; align-items: center; gap: 8px; color: var(--success); font-size: 13px; font-weight: 600; margin: 0 0 24px; }
+        .status svg { width: 18px; height: 18px; flex: none; }
+        h1 { font-size: clamp(28px, 4.5vw, 48px); line-height: 1.25; letter-spacing: -.035em; font-weight: 600; margin: 0 0 20px; overflow-wrap: anywhere; }
+        .lead { margin: 0; font-size: 18px; line-height: 1.7; color: var(--muted); max-width: 600px; }
+        .details { display: grid; grid-template-columns: 1.6fr 1fr; gap: 64px; margin-top: 56px; padding-top: 32px; border-top: 1px solid var(--line); }
+        h2 { margin: 0 0 24px; font-size: 16px; line-height: 1.5; font-weight: 600; }
+        ol { margin: 0; padding: 0; list-style: none; counter-reset: steps; display: grid; gap: 20px; }
+        li { counter-increment: steps; display: grid; grid-template-columns: 24px 1fr; gap: 12px; color: var(--muted); }
+        li::before { content: counter(steps, decimal-leading-zero); color: var(--primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+        li strong { display: block; color: var(--ink); font-weight: 500; margin-bottom: 2px; }
+        .visitor { align-self: start; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 24px; }
+        .visitor h2 { margin-bottom: 12px; }
+        .visitor p { margin: 0; color: var(--muted); }
+        .runtime { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+        dt { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+        dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+        footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding-block: 24px; border-top: 1px solid var(--line); }
+        footer p { margin: 0; }
+        @media (prefers-color-scheme: dark) {
+            :root { color-scheme: dark; --bg: #10171c; --surface: #172127; --ink: #e8eef2; --muted: #a0b0bb; --line: #2b3a44; --primary: #66c5cb; --success: #76c69b; }
+        }
+        @media (max-width: 700px) {
+            .wrap { width: calc(100% - 40px); }
+            header { padding-block: 20px; }
+            main { padding-block: 48px; }
+            .lead { font-size: 16px; }
+            .details { grid-template-columns: minmax(0, 1fr); gap: 32px; margin-top: 36px; padding-top: 28px; }
+            .visitor { padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <header class="wrap">
+        <div class="brand">
+            {{brand_mark}}
+            Qinpanel
+        </div>
+        <span class="header-note">Halaman bawaan situs</span>
+    </header>
+    <main class="wrap">
+        <div class="intro">
+            <p class="status"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"/><path d="m6.5 10 2.3 2.3 4.7-4.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Situs berhasil dibuat</p>
+            <h1>{{domain}}</h1>
+            <p class="lead">Website Anda sedang disiapkan.<br>Tambahkan konten untuk mengganti halaman bawaan ini.</p>
+        </div>
+        <div class="details">
+            <section aria-labelledby="publish-title">
+                <h2 id="publish-title">Publikasikan website Anda</h2>
+                <ol>
+                    <li><div><strong>Buka project di Qinpanel</strong>Masuk ke panel, pilih situs ini, lalu buka menu Berkas.</div></li>
+                    <li><div><strong>Tambahkan konten website</strong>{{instruction}}</div></li>
+                    <li><div><strong>Periksa hasilnya</strong>Buka kembali domain ini setelah konten dipublikasikan.</div></li>
+                </ol>
+            </section>
+            <aside class="visitor" aria-labelledby="visitor-title">
+                <h2 id="visitor-title">Sedang mengunjungi situs ini?</h2>
+                <p>Pemilik situs belum memublikasikan kontennya. Silakan kembali lagi nanti.</p>
+                <dl class="runtime"><dt>Jenis situs</dt><dd>{{runtime}}</dd></dl>
+            </aside>
+        </div>
+    </main>
+    <footer class="wrap"><p>Dikelola dengan Qinpanel</p><p>Halaman ini akan diganti oleh konten website.</p></footer>
+</body>
+</html>

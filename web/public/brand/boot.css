@@ -1,0 +1,159 @@
+/* Shared by the initial HTML, session check and route fallback. */
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url('/fonts/plus-jakarta-sans-latin.woff2') format('woff2');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+:root {
+  --loading-bg: #f5f6f8;
+  --loading-ink: #18262f;
+  --loading-muted: #5d6d79;
+  --loading-line: #e0e5e9;
+  --loading-primary: #087681;
+  color-scheme: light;
+}
+.dark {
+  --loading-bg: #10171c;
+  --loading-ink: #e8eef2;
+  --loading-muted: #a0b0bb;
+  --loading-line: #2b3a44;
+  --loading-primary: #66c5cb;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not(.theme-ready) {
+    --loading-bg: #10171c;
+    --loading-ink: #e8eef2;
+    --loading-muted: #a0b0bb;
+    --loading-line: #2b3a44;
+    --loading-primary: #66c5cb;
+    color-scheme: dark;
+  }
+}
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg, var(--loading-bg));
+  color: var(--ink, var(--loading-ink));
+}
+.panel-loading {
+  box-sizing: border-box;
+  color: var(--ink, var(--loading-ink));
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+}
+/* The application stylesheet can arrive before JavaScript applies its theme. */
+.boot-loading {
+  --bg: var(--loading-bg);
+  --ink: var(--loading-ink);
+  --ink-muted: var(--loading-muted);
+  --line: var(--loading-line);
+  --primary: var(--loading-primary);
+}
+.panel-loading--screen {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: clamp(12px, 4vw, 24px);
+  background: var(--bg, var(--loading-bg));
+}
+.panel-loading--screen .panel-loading__content {
+  width: min(100%, 280px);
+}
+.panel-loading .panel-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  white-space: normal;
+}
+.panel-loading .brand-mark {
+  width: 44px;
+  height: 44px;
+  flex: none;
+}
+.panel-loading .brand-name {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.8px;
+}
+.panel-loading .brand-description {
+  display: block;
+  margin-top: 5px;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: 0;
+  color: var(--ink-muted, var(--loading-muted));
+}
+.panel-loading__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-muted, var(--loading-muted));
+}
+.panel-loading--screen .panel-loading__status {
+  justify-content: center;
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line, var(--loading-line));
+}
+.panel-loading__status p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.panel-loading__spinner {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid var(--line, var(--loading-line));
+  border-top-color: var(--primary, var(--loading-primary));
+  border-radius: 50%;
+  animation: panel-loading-spin 900ms linear infinite;
+}
+.panel-loading--page {
+  min-height: 240px;
+  padding: 24px 0;
+}
+.panel-loading--page .panel-loading__content {
+  width: 100%;
+}
+.panel-loading__placeholder {
+  display: grid;
+  gap: 18px;
+  margin-top: 24px;
+  padding-top: 28px;
+  border-top: 1px solid var(--line, var(--loading-line));
+}
+.panel-loading__placeholder span {
+  display: block;
+  width: min(92%, 480px);
+  height: 12px;
+  border-radius: 3px;
+  background: var(--line, var(--loading-line));
+  opacity: 0.6;
+}
+.panel-loading__placeholder span:first-child {
+  width: min(48%, 220px);
+  height: 18px;
+  margin-bottom: 8px;
+}
+.panel-loading__placeholder span:last-child {
+  width: min(70%, 360px);
+}
+@keyframes panel-loading-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-loading__spinner { animation: none; }
+}
+@media (forced-colors: active) {
+  .panel-loading__spinner { border-color: GrayText; border-top-color: Highlight; }
+}

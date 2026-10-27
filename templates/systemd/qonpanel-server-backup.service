@@ -1,0 +1,18 @@
+[Unit]
+Description=Qinpanel encrypted server backup and migration worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /usr/local/libexec/qonpanel-server-backup
+ExecStopPost=/usr/bin/python3 /usr/local/libexec/qonpanel-server-backup --finalize
+Restart=no
+TimeoutStopSec=600
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
+PrivateTmp=true
+# Independent of panel-api/agent: both are paused during consistent capture/restore.

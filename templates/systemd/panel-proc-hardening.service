@@ -1,0 +1,22 @@
+[Unit]
+Description=Qinpanel host procfs process isolation
+After=local-fs.target
+Before=panel-agent.service panel-api.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# PID 1 launches this fixed command in the host mount namespace. Do not add
+# PrivateTmp/PrivateDevices/ProtectSystem or other mount-namespace directives.
+ExecStart=/usr/bin/mount -o remount,hidepid=2,gid=panel /proc
+RemainAfterExit=yes
+TimeoutStartSec=30s
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SYS_ADMIN
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

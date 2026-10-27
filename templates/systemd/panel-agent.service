@@ -1,0 +1,48 @@
+[Unit]
+Description=Qinpanel Privileged System Daemon (Root Agent)
+Documentation=https://github.com/Whyriez/Qinpanel
+After=network.target
+Before=panel-api.service
+
+[Service]
+Type=simple
+User=root
+Group=panel
+ExecStartPre=/usr/bin/setfacl -m g:panel-tenants:--x,u:www-data:--x -- /run/panel
+ExecStart=/usr/local/bin/panel-agent
+Restart=always
+RestartSec=3s
+KillMode=mixed
+LimitNOFILE=65535
+
+# Systemd security hardening; measure the score on the target host.
+NoNewPrivileges=true
+# Host procfs remounts run in panel-proc-hardening.service, not this daemon.
+ProtectSystem=strict
+# Account tools and PHP/APT need configuration, package databases, caches and logs.
+# Node/Python live in /opt; packages write /usr; lifecycle tools need /home and /run.
+# These are privileged agent permissions, never API or tenant service permissions.
+ReadWritePaths=/etc /home /opt /usr /var /run
+# A read-only /home mount would override the writable entry for that same path.
+ProtectHome=false
+PrivateTmp=true
+MemoryDenyWriteExecute=true
+# nft/libmnl and rtnetlink diagnostics need AF_NETLINK. This permission stays
+# on the privileged agent; API and tenant services must not inherit it.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# nginx -t checks listening sockets on privileged HTTP/HTTPS ports too.
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_SYS_CHROOT CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_KILL CAP_SYS_RESOURCE
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=false
+LockPersonality=true
+
+# Runtime & State directories for agent socket
+RuntimeDirectory=panel
+RuntimeDirectoryMode=0750
+# Tenant sockets share this parent and must survive an agent stop/upgrade.
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

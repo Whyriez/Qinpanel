@@ -1,0 +1,36 @@
+[Unit]
+Description=Qinpanel internal database administration (private FastCGI)
+After=network.target
+
+[Service]
+Type=simple
+User=panel-db-web
+Group=panel-db-web
+ExecStartPre=/usr/bin/setfacl -m u:panel-api:rx,d:u:panel-api:rw /run/panel-db-web
+ExecStart=/usr/bin/php-cgi -c /etc/panel/db-web.ini -b /run/panel-db-web/manager.sock
+Environment=PHP_FCGI_CHILDREN=2
+Environment=PHP_FCGI_MAX_REQUESTS=500
+Restart=always
+RestartSec=3
+UMask=0007
+RuntimeDirectory=panel-db-web
+RuntimeDirectoryMode=0750
+StateDirectory=panel-db-web
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryMax=512M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

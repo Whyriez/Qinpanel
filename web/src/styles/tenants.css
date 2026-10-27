@@ -1,0 +1,364 @@
+.tenant-page {
+  min-width: 0;
+  container: tenant-page / inline-size;
+  overflow-wrap: anywhere;
+}
+
+.tenant-page-header,
+.tenant-hardening-header,
+.tenant-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.tenant-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tenant-header-actions > button {
+  flex: 1 1 auto;
+  justify-content: center;
+}
+
+.tenant-page :where(button, input, select) {
+  min-height: 44px;
+}
+
+.tenant-page button > svg {
+  flex-shrink: 0;
+}
+
+.tenant-page :where(input, select) {
+  min-width: 0;
+  font-size: 16px;
+}
+
+.tenant-hardening-checks {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 110px), 1fr));
+}
+
+.tenant-hardening-title {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+}
+
+.tenant-hardening-title > span:last-child {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.tenant-hardening-checks .truncate {
+  white-space: normal;
+  overflow: visible;
+}
+
+.tenant-search {
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.tenant-filters .tenant-search {
+  flex-basis: auto;
+}
+
+.tenant-status-filter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 8px;
+}
+
+.tenant-filter-label {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.tenant-filter-options {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
+.tenant-filter-options > button {
+  flex: 1 1 auto;
+  padding-inline: 8px;
+  white-space: nowrap;
+}
+
+.tenant-status-filter > button {
+  margin: 0;
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.tenant-desktop-list {
+  display: none;
+}
+
+.tenant-card-fields {
+  display: grid;
+  gap: 12px;
+  margin-block: 16px;
+  font-size: 12px;
+}
+
+.tenant-card-fields dt {
+  color: var(--ink-muted);
+  margin-bottom: 4px;
+}
+
+.tenant-card-fields dd {
+  color: var(--ink);
+  margin: 0;
+}
+
+.tenant-card-actions,
+.tenant-table-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tenant-card-actions {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.tenant-card-actions > button,
+.tenant-table-actions > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tenant-card-actions > button:hover,
+.tenant-table-actions > button:hover {
+  background: var(--raised);
+}
+
+.tenant-card-actions > button:first-child {
+  color: var(--primary);
+}
+
+.tenant-card-actions > .tenant-delete,
+.tenant-table-actions > .tenant-delete {
+  color: var(--danger);
+}
+
+.tenant-card-actions svg,
+.tenant-table-actions svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tenant-detail-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tenant-detail-fields > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tenant-detail-tabs {
+  display: grid;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.tenant-detail-tabs > button {
+  min-width: 0;
+  padding: 10px 8px;
+  margin-bottom: 0;
+}
+
+.tenant-shell-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tenant-shell-badges > * {
+  max-width: 100%;
+  white-space: normal;
+}
+
+.tenant-page :where(.grid > *) {
+  min-width: 0;
+}
+
+.tenant-wizard {
+  overflow-wrap: anywhere;
+}
+
+.tenant-wizard :where(button, input) {
+  min-height: 44px;
+}
+
+.tenant-wizard input:not([type='radio']) {
+  font-size: 16px;
+}
+
+.tenant-wizard .grid > * {
+  min-width: 0;
+}
+
+@media (max-width: 639px) {
+  .tenant-wizard-summary > span:nth-child(even) {
+    margin-bottom: 8px;
+  }
+
+  .tenant-wizard .dialog-footer {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .tenant-wizard .dialog-footer > div {
+    display: contents;
+  }
+
+  .tenant-wizard .dialog-footer button {
+    justify-content: center;
+    width: 100%;
+    padding-inline: 8px;
+  }
+
+  .tenant-wizard .dialog-footer > div:last-child > button:first-child {
+    grid-column: 2;
+  }
+
+  .tenant-wizard .dialog-footer > div:last-child > button:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@container tenant-page (min-width: 480px) {
+  .tenant-card-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tenant-detail-fields > div {
+    flex-direction: row;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .tenant-detail-fields > div > span:last-child {
+    min-width: 0;
+    text-align: right;
+  }
+
+  .tenant-detail-tabs {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container tenant-page (min-width: 760px) {
+  .tenant-resource-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .tenant-page-header,
+  .tenant-hardening-header,
+  .tenant-filters {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .tenant-header-actions {
+    flex-shrink: 0;
+  }
+
+  .tenant-hardening-header > button {
+    flex-shrink: 0;
+  }
+
+  .tenant-search {
+    max-width: 320px;
+  }
+
+  .tenant-filter-label {
+    grid-column: auto;
+  }
+
+  .tenant-filter-options {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .tenant-status-filter > button {
+    grid-column: 3;
+  }
+
+  .tenant-status-filter {
+    grid-template-columns: auto minmax(0, 1fr) 44px;
+  }
+}
+
+@container tenant-page (min-width: 900px) {
+  .tenant-mobile-list {
+    display: none;
+  }
+
+  .tenant-desktop-list {
+    display: block;
+  }
+
+  .tenant-desktop-list table {
+    table-layout: fixed;
+  }
+
+  .tenant-desktop-list :where(th, td) {
+    padding-inline: 12px;
+  }
+
+  .tenant-desktop-list th:first-child {
+    width: 22%;
+  }
+
+  .tenant-desktop-list th:last-child {
+    width: 20%;
+  }
+
+  .tenant-table-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  .tenant-table-actions > button {
+    padding: 6px;
+    min-width: 32px;
+  }
+
+  .tenant-table-actions span {
+    display: none;
+  }
+}

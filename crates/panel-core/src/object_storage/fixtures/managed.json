@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "provider": "seaweedfs_4_50",
+  "engine_commit": "ec8f9793502c59ce3381cc4151bfc0806afd92e8",
+  "connection_id": "11111111-1111-4111-8111-111111111111",
+  "connection_revision": 3,
+  "credential_revision": 5,
+  "configuration_fingerprint": "2bb73f1b86acfb5617b03ad8182d22cfedbff72c690ea595042fc32b429a3c2b",
+  "bucket_id": "22222222-2222-4222-8222-222222222222",
+  "bucket_revision": 1,
+  "observed_at": 1000,
+  "expires_at": 1300,
+  "checks": [
+    {
+      "action": "list_objects",
+      "state": "supported"
+    },
+    {
+      "action": "read_object",
+      "state": "supported"
+    },
+    {
+      "action": "write_object",
+      "state": "supported"
+    },
+    {
+      "action": "presign_read",
+      "state": "supported"
+    },
+    {
+      "action": "presign_write",
+      "state": "supported"
+    },
+    {
+      "action": "multipart_upload",
+      "state": "supported"
+    },
+    {
+      "action": "configure_cors",
+      "state": "supported"
+    }
+  ]
+}

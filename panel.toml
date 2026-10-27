@@ -1,0 +1,12 @@
+# Qinpanel Development Configuration
+
+[server]
+listen_addr = "127.0.0.1:7700"
+environment = "development"
+
+[agent]
+socket_path = "/run/panel/agent.sock"
+
+# Development only: production uses the absolute default in panel-core.
+[database]
+url = "sqlite://panel.db"

@@ -1,0 +1,81 @@
+.storage-page{max-width:1180px;min-width:0}.storage-page h1,.storage-page h2,.storage-page h3{margin:0;font-weight:650}.storage-page h1{font-size:24px}.storage-page h2{font-size:18px}.storage-page p{line-height:1.65}.storage-heading,.storage-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}.storage-heading{margin-bottom:28px}.storage-heading p{margin:6px 0 0;color:var(--ink-muted);font-size:13px}.storage-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.storage-page button,.storage-modal button{min-height:44px}.storage-page button:has(>svg:only-child),.storage-modal button:has(>svg:only-child){min-width:44px;display:inline-flex;align-items:center;justify-content:center}.storage-layout{display:grid;grid-template-columns:260px minmax(0,1fr);gap:28px}.storage-connections{border-right:1px solid var(--line);padding-right:20px}.storage-connection{display:block;width:100%;text-align:left;margin:4px 0;padding:12px!important}.storage-connection small{display:block;color:var(--ink-muted);font-size:11px;overflow-wrap:anywhere}.storage-connection[aria-current=true]{background:var(--raised);border-color:var(--primary);box-shadow:inset 3px 0 var(--primary)}.storage-content{min-width:0}.storage-detail{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:18px 0}.storage-detail dt{font-size:11px;color:var(--ink-muted);margin-bottom:4px}.storage-detail dd{margin:0;font-size:13px;overflow-wrap:anywhere}.storage-note{font-size:12px;color:var(--ink-muted);line-height:1.7}.storage-error{color:var(--danger);font-size:13px;overflow-wrap:anywhere}.storage-notice{padding:12px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:13px;margin:16px 0;overflow-wrap:anywhere}.storage-empty{padding:40px 0;color:var(--ink-muted);font-size:14px}.storage-prefix{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin:20px 0}.storage-prefix label{flex:1;min-width:160px;font-size:12px}.storage-page input,.storage-page select,.storage-modal input,.storage-modal select{display:block;width:100%;min-width:0;min-height:44px;margin-top:6px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit}.storage-object-list{padding:0;margin:0;list-style:none;border-top:1px solid var(--line)}.storage-object{padding:14px 0;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;justify-content:space-between}.storage-object-label{min-width:0;flex:1}.storage-object-label strong{display:block;font-size:13px;font-weight:500;overflow-wrap:anywhere}.storage-object-label small{display:block;font-size:11px;color:var(--ink-muted);margin-top:4px}.storage-folder{font-size:13px;overflow-wrap:anywhere}.storage-upload{margin:22px 0;padding:20px 0;border-top:1px solid var(--line)}.storage-upload form{display:grid;gap:12px}.storage-upload label{font-size:12px}.storage-check{display:flex;gap:10px;align-items:center}.storage-check input{width:16px!important;min-height:16px!important;height:16px!important;margin:0!important;flex:none}.storage-upload progress{width:100%;accent-color:var(--primary)}.storage-code{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;background:var(--surface-sunken);border:1px solid var(--line);border-radius:6px;font:12px/1.8 var(--font-mono,monospace)}.storage-project{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-top:20px}.storage-project label{min-width:180px;flex:1;font-size:12px}.storage-mobile-picker{display:none}@media(max-width:900px){.storage-layout{grid-template-columns:minmax(0,1fr);gap:16px}.storage-connections{display:none}.storage-mobile-picker{display:block;margin:12px 0 20px;font-size:12px}}@media(max-width:480px){.storage-form-grid,.storage-detail{grid-template-columns:minmax(0,1fr)}.storage-form-wide{grid-column:auto}.storage-object{align-items:start;flex-wrap:wrap}.storage-object .storage-actions{margin-left:auto}.storage-heading h1{font-size:22px}}
+
+/* Explicit controls keep action spacing and touch areas consistent with the panel. */
+.storage-page button,.storage-modal button{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:9px 12px;border-radius:6px;font-size:13px}
+.storage-page button:not(.button-primary),.storage-modal button:not(.button-primary){border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.storage-page button:not(.button-primary):enabled:hover,.storage-modal button:not(.button-primary):enabled:hover{background:var(--raised)}
+.storage-connections .storage-connection{display:block;text-align:left;overflow-wrap:anywhere}
+.storage-heading>div:first-child,.storage-toolbar h2{min-width:0;overflow-wrap:anywhere}
+.storage-actions a{display:inline-flex;min-height:44px;align-items:center}
+
+
+/* S3 connection form uses the shared viewport-aware dialog shell. */
+.storage-dialog {
+  max-width: 760px;
+  max-height: min(860px, calc(var(--dialog-viewport-height, 100dvh) - var(--dialog-top) - var(--dialog-bottom)));
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.storage-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.storage-dialog-header h2 { margin: 0; font-size: 20px; font-weight: 650; line-height: 1.4; }
+.storage-dialog-header p { margin: 6px 0 0; color: var(--ink-muted); font-size: 13px; line-height: 1.6; }
+.storage-dialog-header > button { min-width: 44px; padding: 0; }
+.storage-dialog-body { padding: 24px; scrollbar-gutter: stable; scroll-padding: 12px; }
+.storage-form-section { margin: 0; padding: 0; border: 0; min-width: 0; }
+.storage-form-section + .storage-form-section { margin-top: 24px; }
+.storage-form-section legend { margin-bottom: 12px; padding: 0; font-size: 13px; font-weight: 650; line-height: 1.5; }
+.storage-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.storage-destination-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.storage-form-grid label, .storage-session label { min-width: 0; font-size: 12px; line-height: 1.5; }
+.storage-form-wide { grid-column: 1 / -1; }
+.storage-modal input, .storage-modal select { font-size: 14px; }
+.storage-field-hint { margin: 10px 0 0; }
+.storage-session { margin-top: 14px; font-size: 12px; }
+.storage-session summary { width: fit-content; min-height: 44px; padding: 12px 0; cursor: pointer; color: var(--ink-muted); }
+.storage-session label { display: block; margin-bottom: 14px; }
+.storage-credential-note { display: flex; align-items: flex-start; gap: 8px; color: var(--ink-muted); margin-top: 8px; }
+.storage-credential-note > svg { flex-shrink: 0; margin-top: 2px; }
+.storage-credential-note p { margin: 0; font-size: 12px; line-height: 1.7; }
+.storage-dialog .storage-dialog-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 0;
+  padding: 16px 24px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.storage-dialog-footer > p { margin: 0; max-width: 240px; color: var(--ink-muted); font-size: 11px; line-height: 1.6; }
+.storage-dialog-footer > div { display: flex; gap: 8px; flex-shrink: 0; }
+@media (max-width: 560px) {
+  .storage-form-grid, .storage-destination-grid { grid-template-columns: minmax(0, 1fr); }
+  .storage-dialog-header { padding: 18px 16px 14px; }
+  .storage-dialog-header h2 { font-size: 18px; }
+  .storage-dialog-body { padding: 20px 16px; }
+  .storage-modal input, .storage-modal select { font-size: 16px; }
+  .storage-dialog .storage-dialog-footer { padding: 14px 16px; }
+  .storage-dialog-footer > p { display: none; }
+  .storage-dialog-footer > div { display: grid; grid-template-columns: 1fr 1.4fr; width: 100%; }
+}
+
+.storage-managed{border:1px solid var(--line);border-radius:10px;padding:22px;margin-bottom:28px;background:var(--surface)}
+.storage-managed-heading{display:flex;align-items:start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.storage-managed-heading h2{display:flex;align-items:center;gap:9px;font-size:17px}
+.storage-managed-heading p{font-size:13px;color:var(--ink-muted);margin:7px 0}
+.storage-managed-status{font-size:12px;color:var(--ink-muted);border:1px solid var(--line);border-radius:5px;padding:5px 9px}
+.storage-modal textarea{display:block;width:100%;min-width:0;max-width:100%;margin-top:6px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font:12px/1.6 monospace;resize:vertical}
+.storage-modal .storage-form-section>label{display:block;margin-top:16px}
+.storage-modal .storage-form-section>label:first-child{margin-top:0}
+.storage-modal label.storage-tls-consent{display:flex;align-items:flex-start;gap:10px;font-size:12px;line-height:1.7}
+.storage-modal .storage-tls-consent input[type=checkbox]{flex:0 0 auto;width:18px;height:18px;min-height:18px;margin:4px 0 0;padding:0}
+.storage-modal .storage-note a,.storage-modal .storage-notice a,.storage-modal .storage-tls-consent a{color:var(--primary);text-decoration:underline;text-underline-offset:3px}
+.storage-modal .storage-dialog>.dialog-body{flex:1;min-height:0;overflow-y:auto}
+@media(max-width:560px){.storage-managed{padding:16px}.storage-managed .storage-actions{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch}.storage-modal textarea{font-size:16px}}
+
+@media(max-width:560px){.storage-dialog-footer:has(>button){display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr)}.storage-dialog-footer:has(>button)>button:only-child{grid-column:1/-1}.storage-dialog-footer>button{white-space:normal}}

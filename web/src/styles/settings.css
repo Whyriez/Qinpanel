@@ -1,0 +1,105 @@
+.server-settings-page {
+  min-width: 0;
+  container: server-settings / inline-size;
+  overflow-wrap: anywhere;
+}
+
+.settings-mobile-navigation select {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+}
+
+.settings-desktop-navigation {
+  display: none;
+  gap: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-desktop-navigation button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-desktop-navigation button:hover {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+.settings-desktop-navigation button[aria-pressed='true'] {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 600;
+}
+
+.settings-desktop-navigation button[aria-pressed='true']:hover {
+  background: var(--primary-hover);
+}
+
+.server-settings-page svg {
+  flex-shrink: 0;
+}
+
+.server-settings-content,
+.server-settings-content :where(.grid > *, .flex > *) {
+  min-width: 0;
+}
+
+.server-settings-page :where(button, input:not([type='radio'], [type='checkbox']), select) {
+  min-height: 44px;
+}
+
+@container server-settings (max-width: 759px) {
+  .server-settings-content :where(input:not([type='radio'], [type='checkbox']), select, textarea) {
+    font-size: 16px;
+  }
+
+  .settings-section-tabs {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    overflow: visible;
+    align-items: stretch;
+  }
+
+  .settings-section-tabs > button {
+    justify-content: center;
+    text-align: center;
+  }
+
+  .settings-optimizer-tabs,
+  .settings-network-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container server-settings (min-width: 760px) {
+  .settings-mobile-navigation {
+    display: none;
+  }
+
+  .settings-desktop-navigation {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

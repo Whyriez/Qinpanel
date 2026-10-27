@@ -1,0 +1,62 @@
+# =========================
+# Rust
+# =========================
+target/
+**/*.rs.bk
+
+
+# =========================
+# Node & Frontend
+# =========================
+node_modules/
+.wrangler/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+web/coverage/
+web/artifacts/
+
+
+# =========================
+# Panel runtime & data files
+# =========================
+*.db
+*.db-wal
+*.db-shm
+*.sock
+
+/run/
+/var/
+/etc/panel/
+
+secret.key
+*.env
+!.env.example
+*.log
+
+
+# =========================
+# Local documentation (only the root README is public)
+# =========================
+docs/
+*.[mM][dD]
+!/README.md
+
+# =========================
+# OS & Editors
+# =========================
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/
+
+*.swp
+*.swo
+
+
+# =========================
+# Tests & Coverage
+# =========================
+coverage/
+lcov.info

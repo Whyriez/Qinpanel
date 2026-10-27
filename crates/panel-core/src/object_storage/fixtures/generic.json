@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "provider": "s3_compatible",
+  "engine_commit": null,
+  "connection_id": "11111111-1111-4111-8111-111111111111",
+  "connection_revision": 3,
+  "credential_revision": 7,
+  "configuration_fingerprint": "89a2d00fabd53bf6480d0bc3c0a994ef181ccf20774a84f666d7c5ff21b2e618",
+  "bucket_id": "22222222-2222-4222-8222-222222222222",
+  "bucket_revision": 1,
+  "observed_at": 1000,
+  "expires_at": 1300,
+  "checks": [
+    {
+      "action": "list_objects",
+      "state": "supported"
+    },
+    {
+      "action": "read_object",
+      "state": "supported"
+    },
+    {
+      "action": "write_object",
+      "state": "supported"
+    },
+    {
+      "action": "presign_read",
+      "state": "supported"
+    },
+    {
+      "action": "presign_write",
+      "state": "supported"
+    },
+    {
+      "action": "multipart_upload",
+      "state": "supported"
+    },
+    {
+      "action": "configure_cors",
+      "state": "supported"
+    }
+  ]
+}

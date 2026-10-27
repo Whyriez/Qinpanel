@@ -1,0 +1,26 @@
+{
+  "redirects": [{ "id": "redirect_existing", "source": "/old-existing", "target": "/existing", "status_code": 302, "match_type": "prefix", "enabled": false }],
+  "custom_headers": [{ "id": "header_existing", "name": "X-Fixture", "value": "saved", "always": false, "enabled": false }],
+  "security_headers": {
+    "hsts_enabled": false, "hsts_subdomains": false, "hsts_preload": false,
+    "x_frame_options": "DENY", "x_content_type_options": true,
+    "referrer_policy": null, "permissions_policy": "camera=()", "csp": "default-src 'self'"
+  },
+  "cors": {
+    "enabled": false, "preset": "custom", "allowed_origins": ["https://app.example.com"],
+    "allowed_methods": ["GET", "POST"], "allowed_headers": ["Content-Type"],
+    "exposed_headers": ["X-Trace"], "allow_credentials": false, "max_age_secs": 0
+  },
+  "hotlink_protection": {
+    "enabled": true, "allowed_domains": ["cdn.example.com"], "file_extensions": ["png"],
+    "allow_empty_referer": false, "action": "deny", "redirect_url": null
+  },
+  "basic_auth": { "enabled": false, "path": "/admin", "realm": "Existing realm", "users": [] },
+  "ip_access": {
+    "enabled": false, "scope": "path", "path": "/internal", "default_action": "deny",
+    "rules": [{ "id": "ip_existing", "action": "allow", "cidr_or_ip": "192.0.2.0/24", "description": "Existing network" }]
+  },
+  "maintenance": { "enabled": false, "bypass_ips": ["127.0.0.1"], "retry_after_secs": 0, "custom_message": "Existing message" },
+  "custom_error_pages": [{ "status_code": 404, "target": "/errors/404.html" }],
+  "nginx_snippet": { "enabled": false, "content": "" }
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=Qinpanel version update worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+StateDirectory=panel-updater
+StateDirectoryMode=0700
+EnvironmentFile=/var/lib/panel-updater/request.env
+ExecStart=/usr/local/libexec/panel-update-worker
+ExecStopPost=/usr/local/libexec/panel-update-worker --finalize
+Restart=no
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# Independent service: never PartOf/BindsTo/Requires panel-api or panel-agent.

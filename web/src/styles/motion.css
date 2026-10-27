@@ -1,0 +1,225 @@
+:root {
+  --motion-fast: 120ms;
+  --motion-panel: 200ms;
+  --motion-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.dialog-overlay {
+  --dialog-top: max(16px, env(safe-area-inset-top));
+  --dialog-bottom: max(16px, env(safe-area-inset-bottom));
+  position: fixed;
+  inset: 0;
+  top: var(--dialog-viewport-top, 0px);
+  bottom: auto;
+  height: var(--dialog-viewport-height, 100dvh);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--dialog-top) max(16px, env(safe-area-inset-right)) var(--dialog-bottom)
+    max(16px, env(safe-area-inset-left));
+  overflow: hidden;
+  background: rgb(9 19 27 / 48%);
+  backdrop-filter: none;
+  transition: none;
+  animation: dialog-backdrop-in var(--motion-panel) var(--motion-ease);
+}
+.dialog-overlay[data-variant='sheet'] {
+  justify-content: flex-end;
+}
+.dialog-overlay[data-variant='sheet'] .dialog-panel {
+  animation-name: dialog-sheet-in;
+}
+.dialog-overlay[inert] {
+  pointer-events: none;
+}
+.dialog-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-height: calc(var(--dialog-viewport-height, 100dvh) - var(--dialog-top) - var(--dialog-bottom));
+  margin: 0;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-floating);
+  transition: none;
+  animation: dialog-panel-in var(--motion-panel) var(--motion-ease);
+}
+.dialog-panel > :not(.dialog-body, .dialog-form) {
+  flex-shrink: 0;
+}
+.dialog-header,
+.dialog-footer {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.dialog-header {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+.dialog-header > div {
+  min-width: 0;
+}
+.dialog-header > div:first-child { flex: 1; }
+.dialog-header > button { flex-shrink: 0; }
+.dialog-header > div:not(:first-child) { flex-wrap: wrap; }
+.dialog-header :where(div) { min-width: 0; }
+.dialog-header :where(h1, h2, h3) {
+  overflow-wrap: anywhere;
+}
+.dialog-footer {
+  flex-wrap: wrap;
+  row-gap: 10px;
+}
+.dialog-footer > div { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.dialog-footer button { max-width: 100%; white-space: normal; }
+.dialog-stepper { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; padding: 0; list-style: none; }
+.dialog-stepper > li { min-width: 0; }
+.dialog-stepper > li > div { min-width: 0; }
+.dialog-stepper > li > div > div { flex-shrink: 0; }
+/* Keep the 2px focus outline + 3px offset inside each scrolling form body.
+   Utility padding still wins for bodies with larger spacing or a flush editor. */
+@layer base {
+  .dialog-body {
+    padding: 6px;
+  }
+}
+.dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+  scroll-padding: 6px;
+}
+.dialog-form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.dialog-form > .dialog-footer {
+  margin-top: 16px;
+}
+.dialog-panel :where(input, select, textarea, fieldset) {
+  min-width: 0;
+  max-width: 100%;
+  scroll-margin-block: 6px;
+}
+.dialog-panel [cmdk-root] {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.dialog-panel [cmdk-list] {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.dialog-step {
+  animation: dialog-step-in var(--motion-panel) var(--motion-ease);
+}
+body:has(.dialog-overlay) .panel-content {
+  overflow: hidden;
+}
+.panel-content {
+  scrollbar-gutter: stable;
+}
+
+/* Existing interaction classes now have a real animation without another dependency. */
+.animate-in:not(.dialog-overlay, .dialog-panel) {
+  animation: dialog-step-in var(--motion-panel) var(--motion-ease);
+}
+.panel-shell :where(button, a) {
+  transition-property: background-color, color, border-color, box-shadow, opacity, transform;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--motion-ease);
+}
+.panel-shell :where(button, a):active:not(:disabled),
+.dialog-panel button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.dialog-panel :where(button, a, input, select, textarea) {
+  transition:
+    background-color var(--motion-fast),
+    border-color var(--motion-fast),
+    color var(--motion-fast),
+    box-shadow var(--motion-fast),
+    transform var(--motion-fast);
+}
+.dialog-panel button[class*="bg-[var(--primary)]"] { color: var(--primary-foreground); }
+.hosting-table tbody tr {
+  transition: background-color var(--motion-fast);
+}
+
+@keyframes dialog-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes dialog-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes dialog-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes dialog-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 480px), (max-height: 480px) {
+  .dialog-overlay {
+    --dialog-top: max(12px, env(safe-area-inset-top));
+    --dialog-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+}
+@media (max-width: 480px) {
+  .dialog-stepper > li > div { flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+  .dialog-footer > div { justify-content: flex-end; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dialog-overlay,
+  .dialog-panel,
+  .dialog-step,
+  .animate-in {
+    animation: none !important;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}

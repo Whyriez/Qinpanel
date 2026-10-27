@@ -1,0 +1,9 @@
+.ai-settings button,
+.ai-package-assistant button,
+.button-secondary.ai-package-launcher {
+  min-height: 44px;
+}
+
+.ai-package-assistant button[aria-label] {
+  min-width: 44px;
+}

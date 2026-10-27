@@ -1,0 +1,17 @@
+/* Override the console's compact control sizes for audit filters and navigation. */
+.audit-page .audit-control,
+.audit-detail .audit-control {
+  min-height: 44px;
+}
+
+.audit-page button.audit-control,
+.audit-detail button.audit-control {
+  min-width: 44px;
+}
+
+.audit-page .audit-category[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+  color: var(--primary);
+  font-weight: 600;
+}

@@ -1,0 +1,16 @@
+name: Managed object storage acceptance
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install native fixture dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y nginx acl openssl ca-certificates python3
+      - name: Run actual engine, systemd and S3 HTTPS acceptance on this disposable VM
+        run: sudo env GITHUB_ACTIONS=true QONPANEL_DISPOSABLE_CI=1 python3 scripts/tests/managed-storage-native-test.py
