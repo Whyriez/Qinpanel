@@ -78,7 +78,7 @@ pub struct SystemdDirective {
     pub description: String,
 }
 
-/// Systemd service security analysis score conforming to `systemd-analyze security`.
+/// Template-based security indicator, not a native `systemd-analyze security` measurement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SystemdServiceSecurityScore {
@@ -503,15 +503,48 @@ mod tests {
     fn test_systemd_security_evaluation() {
         let scores = get_default_service_security_evaluations();
         assert_eq!(scores.len(), 2);
-        for s in scores {
+        for (name, root, exposure, rating) in [
+            ("panel-api.service", false, 0.2, "OK"),
+            // The root agent needs writable tenant homes and AF_NETLINK for nft.
+            // Their exposure remains visible; do not force an OK rating.
+            ("panel-agent.service", true, 2.1, "MEDIUM"),
+        ] {
+            let s = scores
+                .iter()
+                .find(|score| score.service_name == name)
+                .expect("service score");
             assert!(
-                s.exposure_score <= 2.0,
-                "Service {} exposure score {} must be <= 2.0",
+                (s.exposure_score - exposure).abs() <= f32::EPSILON,
+                "Service {} exposure score {} differs from baseline {}",
                 s.service_name,
-                s.exposure_score
+                s.exposure_score,
+                exposure,
             );
-            assert_eq!(s.rating, "OK");
+            assert_eq!(s.rating, rating);
+            assert_eq!(s.is_root, root);
             assert!(s.sandboxed);
+            if root {
+                let families = s
+                    .directives
+                    .iter()
+                    .find(|directive| directive.name == "RestrictAddressFamilies")
+                    .expect("socket family assessment");
+                assert_eq!(
+                    families.detected_setting.as_deref(),
+                    Some("AF_UNIX AF_INET AF_INET6 AF_NETLINK")
+                );
+                assert!(
+                    !families.compliant,
+                    "required Netlink access must still contribute to exposure"
+                );
+                let home = s
+                    .directives
+                    .iter()
+                    .find(|directive| directive.name == "ProtectHome")
+                    .expect("home assessment");
+                assert_eq!(home.detected_setting.as_deref(), Some("false"));
+                assert!(!home.compliant);
+            }
         }
     }
 

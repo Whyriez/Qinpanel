@@ -5,7 +5,9 @@ import {
 } from '../../api/client';
 import type {
   SecurityHardeningOverviewResponse,
+  SystemdServiceSecurityScore,
 } from '../../types/api';
+import { StatusPill } from '../ui/StatusPill';
 import {
   ShieldCheck,
   ShieldAlert,
@@ -21,6 +23,11 @@ import {
 
 interface SecurityHardeningCardProps {
   onRefresh?: () => void;
+}
+
+export function ServiceExposureBadge({ value }: { value: Pick<SystemdServiceSecurityScore, 'exposure_score' | 'rating'> }) {
+  const variant=value.rating==='OK'?'success':value.rating==='MEDIUM'?'warning':value.rating==='EXPOSED'?'danger':'neutral';
+  return <StatusPill size="sm" variant={variant} label={`${value.exposure_score.toFixed(1)} ${value.rating}`} />;
 }
 
 export const SecurityHardeningCard: React.FC<SecurityHardeningCardProps> = ({
@@ -385,9 +392,7 @@ export const SecurityHardeningCard: React.FC<SecurityHardeningCardProps> = ({
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-[var(--ink-muted)]">Paparan:</span>
-                    <span className="badge badge-success text-xs font-bold px-2 py-0.5">
-                      {svc.exposure_score.toFixed(1)} {svc.rating}
-                    </span>
+                    <ServiceExposureBadge value={svc} />
                   </div>
                 </div>
 

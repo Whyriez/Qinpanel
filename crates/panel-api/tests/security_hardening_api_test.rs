@@ -335,11 +335,28 @@ async fn test_get_security_hardening_overview_admin() {
     assert_eq!(overview.nftables_status.table_name, "panel_loopback_guard");
 
     assert_eq!(overview.systemd_security.len(), 2);
-    for s in &overview.systemd_security {
-        assert!(s.exposure_score <= 2.0);
-        assert_eq!(s.rating, "OK");
-        assert!(s.sandboxed);
-    }
+    assert_eq!(
+        overview.systemd_security,
+        panel_core::hardening::get_default_service_security_evaluations(),
+        "API must report the template assessment without hiding privileged-agent exposure"
+    );
+    let api = overview
+        .systemd_security
+        .iter()
+        .find(|score| score.service_name == "panel-api.service")
+        .expect("API score");
+    assert!(!api.is_root);
+    assert!(api.exposure_score <= 2.0);
+    assert_eq!(api.rating, "OK");
+    let agent = overview
+        .systemd_security
+        .iter()
+        .find(|score| score.service_name == "panel-agent.service")
+        .expect("agent score");
+    assert!(agent.is_root);
+    assert!(agent.exposure_score > 2.0 && agent.exposure_score <= 5.0);
+    assert_eq!(agent.rating, "MEDIUM");
+    assert!(api.sandboxed && agent.sandboxed);
     assert!(overview.secret_vault_active);
 }
 
