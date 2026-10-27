@@ -353,12 +353,23 @@ mod failure_tests {
                         password_hash: "fixture".into(),
                         role: role.into(),
                         email: None,
-                        linux_username: Some(username.into()),
+                        linux_username: (role == "user").then(|| {
+                            panel_core::Username::from_slug(username)
+                                .expect("valid fixture Linux username")
+                                .as_str()
+                                .to_owned()
+                        }),
                         linux_uid: (role == "user").then_some(uid),
                         plan_id: None,
                     })
                     .await
                     .expect("user"),
+            );
+        }
+        for owner in owners.iter().take(2) {
+            assert!(
+                crate::tenant_context::execution_identity(owner).is_ok(),
+                "positive fixture must have an authoritative Linux identity"
             );
         }
         for (owner, kind, status, port) in [
@@ -385,17 +396,46 @@ mod failure_tests {
             .execute(&pool)
             .await
             .expect("collision");
-        assert!(automatic_bindings(&pool).await.is_err());
+        assert!(
+            automatic_bindings(&pool)
+                .await
+                .expect_err("cross-owner port collision")
+                .contains("dua tenant")
+        );
         sqlx::query("UPDATE sites SET status='disabled' WHERE user_id=?")
             .bind(owners[1].id)
             .execute(&pool)
             .await
             .expect("disable");
-        sqlx::query("UPDATE users SET linux_uid=0 WHERE id=?")
+        assert_eq!(
+            automatic_bindings(&pool).await.expect("collision removed"),
+            bindings
+        );
+        sqlx::query("UPDATE users SET linux_username='tenantone' WHERE id=?")
             .bind(owners[0].id)
             .execute(&pool)
             .await
-            .expect("invalid identity");
-        assert!(automatic_bindings(&pool).await.is_err());
+            .expect("invalid Linux username");
+        assert!(
+            automatic_bindings(&pool)
+                .await
+                .expect_err("Linux username without tenant prefix")
+                .contains("identitas Linux")
+        );
+        for uid in [0, 1001, 60000] {
+            sqlx::query("UPDATE users SET linux_username=?,linux_uid=? WHERE id=?")
+                .bind(owners[0].linux_username.as_deref().expect("Linux username"))
+                .bind(uid)
+                .bind(owners[0].id)
+                .execute(&pool)
+                .await
+                .expect("invalid UID fixture");
+            assert!(
+                automatic_bindings(&pool)
+                    .await
+                    .expect_err("UID outside tenant range")
+                    .contains("identitas Linux")
+            );
+        }
     }
 }
