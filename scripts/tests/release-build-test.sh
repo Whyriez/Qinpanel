@@ -98,13 +98,9 @@ for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
     [[ "$output" == *'[SUKSES]'* ]]
     primary="$archive"
     (cd "$MOCK_REPO/release" && sha256sum -c "$(basename "$primary").sha256" --status)
-    for brand in qonpanel nusa-panel; do
-        compatible="$MOCK_REPO/release/$brand-v0.1.0-$target.tar.gz"
-        (cd "$MOCK_REPO/release" && sha256sum -c "$(basename "$compatible").sha256" --status)
-        tar -xzf "$compatible" -C "$extract"
-        diff -r "$extract/qinpanel-v0.1.0-$target" "$extract/$brand-v0.1.0-$target"
-    done
-    pass "canonical Qinpanel and both compatibility $target archives have correct roots and identical payloads"
+    ! compgen -G "$MOCK_REPO/release/nusa-panel-*" >/dev/null
+    ! compgen -G "$MOCK_REPO/release/qonpanel-*" >/dev/null
+    pass "only the Qinpanel $target archive and checksum are generated"
     pass "native $target GLIBC gate and tarball read freshly compiled artifacts"
 
     (export QONPANEL_RELEASE_BASE_URL=https://download.arelqon.com/qonpanel; unset CARGO_TARGET_DIR; bash "$MOCK_REPO/scripts/package-release.sh" "$target" v0.1.0 >/dev/null)
@@ -113,6 +109,42 @@ for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
     (cd "$MOCK_REPO/release" && sha256sum -c "$(basename "$primary").sha256" --status)
     pass "verified $target package pins future worker downloads to the built distribution source"
 done
+
+python3 - "$REPO" "$MOCK_REPO/release" "$fixture/verified-dist" <<'PY'
+import importlib.util
+from pathlib import Path
+import shutil
+import sys
+
+sys.dont_write_bytecode = True
+repo, packaged, distribution = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("publisher", repo / "scripts/publish-distribution.py")
+publisher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(publisher)
+distribution.mkdir()
+for archive in packaged.glob("qinpanel-*.tar.gz"):
+    shutil.copyfile(archive, distribution / archive.name)
+checksum_parts = []
+for path in sorted(packaged.glob("qinpanel-*.tar.gz.sha256")):
+    data = path.read_bytes()
+    # MSYS sha256sum marks binary mode with '*'; emulate Linux release-runner
+    # checksum syntax for this local fixture without changing any archive bytes.
+    if sys.platform == "win32":
+        data = data.replace(b" *qinpanel-", b"  qinpanel-", 1)
+    checksum_parts.append(data)
+(distribution / "SHA256SUMS").write_bytes(b"".join(checksum_parts))
+manifest, _ = publisher.prepare(
+    distribution, "v0.1.0", "https://download.arelqon.com/qonpanel", repo / "scripts/bootstrap-install.sh"
+)
+github = distribution.parent / "verified-github"
+publisher.prepare_github_assets(distribution, github, manifest)
+expected = {f"qinpanel-v0.1.0-{target}.tar.gz" for target in publisher.TARGETS} | {"SHA256SUMS"}
+assert {path.name for path in distribution.iterdir()} == expected
+assert {path.name for path in github.iterdir()} == expected
+for name in expected:
+    assert (distribution / name).read_bytes() == (github / name).read_bytes()
+PY
+pass 'actual packaged Qinpanel archives and combined checksums pass publisher and GitHub staging verification'
 
 FAKE_HOST=x86_64-unknown-linux-gnu
 # Execute the packaging run block from the real CI workflow with mocked artifacts.
@@ -312,7 +344,10 @@ grep -Fq 'name: qinpanel-${{ matrix.target }}' "$workflow"
 grep -Fq -- '--github-directory github-dist' "$workflow"
 grep -Fq '            github-dist/*' "$workflow"
 ! grep -Fq '            dist/*' "$workflow"
-pass 'GitHub release uses separately verified canonical assets while Storage retains upgrade compatibility'
+grep -Fq '            release/qinpanel-*.tar.gz' "$workflow"
+grep -Fq '            release/qinpanel-*.tar.gz.sha256' "$workflow"
+! grep -Fq '            release/*.tar.gz' "$workflow"
+pass 'artifact upload and GitHub release select only Qinpanel archives and checksums'
 grep -Fq "default: 'v0.1.0'" "$workflow"
 grep -Fq 'default: false' "$workflow"
 grep -Fq "github.event_name == 'workflow_dispatch' && inputs.publish" "$workflow"

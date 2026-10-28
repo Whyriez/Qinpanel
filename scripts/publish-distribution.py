@@ -115,11 +115,12 @@ def prepare(directory, tag, base, bootstrap):
     if not re.fullmatch(r"v(0|[1-9][0-9]{0,7})\.(0|[1-9][0-9]{0,7})\.(0|[1-9][0-9]{0,7})", tag):
         raise PublicationError("Distribution requires a stable version tag")
     actual = {p.name for p in directory.iterdir()}
-    compatibility = {f"{brand}-{tag}-{target}.tar.gz" for brand in ("qonpanel", "nusa-panel") for target in TARGETS}
-    canonical = {f"qinpanel-{tag}-{target}.tar.gz" for target in TARGETS}
-    # Resuming an original build must not rename or repackage its immutable set.
-    new_layout = compatibility | canonical
-    expected = new_layout if actual == new_layout | {"SHA256SUMS"} else compatibility
+    expected = {f"qinpanel-{tag}-{target}.tar.gz" for target in TARGETS}
+    if any(name.startswith(("qonpanel-", "nusa-panel-")) for name in actual):
+        raise PublicationError(
+            "Historical artifact names cannot be published; build Qinpanel-only artifacts "
+            "from the updated workflow. Existing version objects remain immutable."
+        )
     if actual != expected | {"SHA256SUMS"} or any(p.is_symlink() or not p.is_file() for p in directory.iterdir()):
         raise PublicationError("Unexpected/missing release file; only explicit packaged assets may be published")
     declared = parse_checksums((directory / "SHA256SUMS").read_text())
@@ -149,14 +150,14 @@ def prepare(directory, tag, base, bootstrap):
 
 
 def prepare_github_assets(directory, destination, manifest):
-    """Select canonical assets from verified payloads without rewriting archives."""
+    """Stage Qinpanel assets from verified payloads without rewriting archives."""
     if destination.resolve().is_relative_to(directory.resolve()):
         raise PublicationError("Keep GitHub staging outside the verified distribution directory")
     assets = [asset for asset in json.loads(manifest)["assets"] if asset["name"].endswith(".tar.gz")]
     verified_checksums = {asset["name"]: asset["digest"].removeprefix("sha256:") for asset in assets}
     archives = list(verified_checksums)
-    canonical = [name for name in archives if name.startswith("qinpanel-")]
-    selected = canonical or archives
+    if not archives or any(not name.startswith("qinpanel-") for name in archives):
+        raise PublicationError("GitHub assets must use Qinpanel filenames")
     checksums = parse_checksums((directory / "SHA256SUMS").read_text())
     if checksums != verified_checksums:
         raise PublicationError("GitHub checksum set changed after release verification")
@@ -164,17 +165,11 @@ def prepare_github_assets(directory, destination, manifest):
         destination.mkdir()  # Never mix stale assets with the verified selection.
     except FileExistsError:
         raise PublicationError("GitHub staging directory already exists; use a new output directory") from None
-    for name in selected:
+    for name in archives:
         shutil.copyfile(directory / name, destination / name)
         if digest_file(destination / name) != checksums[name]:
             raise PublicationError("GitHub asset changed after release verification")
-    if canonical:
-        (destination / "SHA256SUMS").write_bytes("".join(checksums[name] + "  " + name + "\n" for name in sorted(selected)).encode())
-    else:
-        # Original artifacts may predate the canonical filenames. Preserve their
-        # bytes/names, including the original checksum file, when resuming.
-        shutil.copyfile(directory / "SHA256SUMS", destination / "SHA256SUMS")
-        print("Original artifacts use historical filenames; preserving the original release assets.")
+    shutil.copyfile(directory / "SHA256SUMS", destination / "SHA256SUMS")
 
 
 class Store:
@@ -372,7 +367,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, default=Path("dist"))
     parser.add_argument("--tag", required=True)
-    parser.add_argument("--github-directory", type=Path, help="Stage canonical GitHub assets; Storage retains compatibility downloads")
+    parser.add_argument("--github-directory", type=Path, help="Stage verified Qinpanel assets for GitHub")
     args = parser.parse_args()
     base = os.environ.get("QONPANEL_RELEASE_BASE_URL", "")
     manifest, installer = prepare(args.directory, args.tag, base, Path("scripts/bootstrap-install.sh"))

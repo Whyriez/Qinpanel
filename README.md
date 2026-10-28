@@ -131,9 +131,10 @@ oleh Worker atau installer. Repository variable `QONPANEL_RELEASE_BASE_URL`,
 Jalankan workflow **Qinpanel release** dengan opsi publish atau push tag versi.
 Paket diverifikasi dari Supabase dan domain sebelum `latest.json` dipromosikan.
 Build baru memakai `qinpanel-vVERSI-TARGET.tar.gz`. Asset GitHub Release hanya
-memuat paket utama kedua arsitektur dan `SHA256SUMS`; unduhan kompatibilitas
-untuk updater lama tetap tersedia melalui distribusi Storage. Melanjutkan
-artifact build lama mempertahankan nama dan byte aslinya.
+memuat paket utama kedua arsitektur dan `SHA256SUMS`. Supabase juga hanya
+menerima paket `qinpanel-*`; build baru tidak membuat paket `nusa-panel-*`
+atau `qonpanel-*`. Artifact build lama dengan nama tersebut ditolak sebelum
+upload. Installer/updater tetap dapat membaca rilis historis yang sudah ada.
 Versi yang telah dipublikasikan tidak dapat ditimpa dengan konten berbeda;
 gunakan versi baru. Bucket hanya untuk artifact distribusi: unduhan publik,
 sedangkan penulisan melalui secret CI. Source Rust dan dokumen internal tidak

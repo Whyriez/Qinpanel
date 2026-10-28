@@ -117,8 +117,8 @@ jobs:
         with:
           name: qinpanel-${{ matrix.target }}
           path: |
-            release/*.tar.gz
-            release/*.sha256
+            release/qinpanel-*.tar.gz
+            release/qinpanel-*.tar.gz.sha256
 
   publish-release:
     name: Publish Qinpanel release

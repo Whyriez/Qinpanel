@@ -115,18 +115,8 @@ for destination in "${destinations[@]}"; do
     }
 done
 (cd "$temporary" && sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256")
-# Compatibility downloads keep their own roots for already-installed bootstraps.
-# They are published to Storage, not advertised as new GitHub Release assets.
-for brand in qonpanel nusa-panel; do
-    legacy_name="$brand-$TAG-$TARGET"
-    cp -R "$stage" "$temporary/$legacy_name"
-    tar --exclude='*.[mM][dD]' -czf "$temporary/$legacy_name.tar.gz" -C "$temporary" "$legacy_name"
-    legacy_listing="$(tar -tzf "$temporary/$legacy_name.tar.gz")"
-    for destination in "${destinations[@]}"; do
-        grep -Fxq "$legacy_name/$destination" <<< "$legacy_listing" || exit 1
-    done
-    (cd "$temporary" && sha256sum "$legacy_name.tar.gz" > "$legacy_name.tar.gz.sha256")
-done
+# New releases publish only Qinpanel archives. Historical names remain readable
+# by the bootstrap/updater, but are never generated again by packaging.
 mv "$temporary/"*.tar.gz "$temporary/"*.tar.gz.sha256 "$OUTPUT_DIR/"
 printf '[SUKSES] Paket rilis: %s/%s\nChecksum: %s/%s.sha256\n' \
     "$OUTPUT_DIR" "$ARCHIVE_NAME" "$OUTPUT_DIR" "$ARCHIVE_NAME"

@@ -56,9 +56,8 @@ class PublicationTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.github_directory = Path(self.enterContext(tempfile.TemporaryDirectory())) / "github"
         self.bootstrap = ROOT / "scripts/bootstrap-install.sh"
-        for brand in ("qonpanel", "nusa-panel"):
-            for target in pub.TARGETS:
-                self.archive(brand, target)
+        for target in pub.TARGETS:
+            self.archive("qinpanel", target)
         self.checksums()
 
     def archive(self, brand, target, extra=None, base=BASE):
@@ -76,28 +75,25 @@ class PublicationTests(unittest.TestCase):
     def prepare(self):
         return pub.prepare(self.directory, TAG, BASE, self.bootstrap)
 
-    def add_canonical_archives(self):
-        for target in pub.TARGETS:
-            self.archive("qinpanel", target)
-        self.checksums()
-
-    def test_new_release_verifies_canonical_and_both_compatibility_archives(self):
-        self.add_canonical_archives()
+    def test_new_release_publishes_only_qinpanel_archives_and_checksums(self):
         manifest, installer = self.prepare()
         value = json.loads(manifest)
-        self.assertEqual(len(value["assets"]), 7)
+        self.assertEqual(len(value["assets"]), 3)
         self.assertEqual(value["body"], "Qinpanel " + TAG)
         store = FakeStore()
         with patch.object(pub, "public_digest", store.digest):
             pub.publish(store, self.directory, TAG, BASE, manifest, installer)
-        for brand in ("qinpanel", "qonpanel", "nusa-panel"):
-            for target in pub.TARGETS:
-                name = f"{brand}-{TAG}-{target}.tar.gz"
-                self.assertEqual(store.objects[f"releases/{TAG}/{name}"], (self.directory / name).read_bytes())
+        for target in pub.TARGETS:
+            name = f"qinpanel-{TAG}-{target}.tar.gz"
+            self.assertEqual(store.objects[f"releases/{TAG}/{name}"], (self.directory / name).read_bytes())
+        self.assertEqual(len([name for name in store.objects if name.endswith(".tar.gz")]), 2)
+        for old_brand in ("nusa-panel", "qonpanel"):
+            self.assertFalse(any(old_brand in name for name in store.objects))
+            self.assertNotIn(old_brand.encode(), manifest)
+            self.assertNotIn(old_brand.encode(), store.objects[f"releases/{TAG}/SHA256SUMS"])
         self.assertEqual(store.calls[-2:], ["install.sh", "latest.json"])
 
-    def test_github_lists_only_canonical_archives_with_matching_filtered_checksums(self):
-        self.add_canonical_archives()
+    def test_github_lists_only_canonical_archives_with_matching_checksums(self):
         manifest, _ = self.prepare()
         original_checksums = (self.directory / "SHA256SUMS").read_bytes()
         pub.prepare_github_assets(self.directory, self.github_directory, manifest)
@@ -112,17 +108,14 @@ class PublicationTests(unittest.TestCase):
         self.assertNotIn(b"qonpanel", (self.github_directory / "SHA256SUMS").read_bytes())
         self.assertNotIn(b"nusa-panel", (self.github_directory / "SHA256SUMS").read_bytes())
 
-    def test_original_build_resume_preserves_published_filenames_and_bytes(self):
+    def test_qinpanel_build_resume_preserves_published_filenames_and_bytes(self):
         manifest, _ = self.prepare()
-        with patch.object(pub.sys, "stdout", io.StringIO()) as output:
-            pub.prepare_github_assets(self.directory, self.github_directory, manifest)
-        self.assertIn("preserving the original release assets", output.getvalue())
+        pub.prepare_github_assets(self.directory, self.github_directory, manifest)
         self.assertEqual({p.name for p in self.directory.iterdir()}, {p.name for p in self.github_directory.iterdir()})
         for path in self.directory.iterdir():
             self.assertEqual(path.read_bytes(), (self.github_directory / path.name).read_bytes())
 
-    def test_cli_stages_canonical_github_assets_and_publishes_compatibility_downloads(self):
-        self.add_canonical_archives()
+    def test_cli_stages_and_publishes_only_qinpanel_downloads(self):
         store = FakeStore()
         argv = ["publish-distribution.py", "--directory", str(self.directory), "--tag", TAG,
                 "--github-directory", str(self.github_directory)]
@@ -130,17 +123,53 @@ class PublicationTests(unittest.TestCase):
             pub.main()
         self.assertEqual(len(list(self.github_directory.glob("*.tar.gz"))), 2)
         self.assertTrue(all(path.name.startswith("qinpanel-") for path in self.github_directory.glob("*.tar.gz")))
-        self.assertEqual(len([name for name in store.objects if name.endswith(".tar.gz")]), 6)
+        self.assertEqual(len([name for name in store.objects if name.endswith(".tar.gz")]), 2)
         self.assertEqual(store.calls[-2:], ["install.sh", "latest.json"])
 
-    def test_incomplete_canonical_layout_is_not_treated_as_an_original_build(self):
-        self.archive("qinpanel", pub.TARGETS[0])
+    def test_incomplete_canonical_layout_is_rejected(self):
+        (self.directory / f"qinpanel-{TAG}-{pub.TARGETS[0]}.tar.gz").unlink()
         self.checksums()
         with self.assertRaisesRegex(pub.PublicationError, "Unexpected/missing"):
             self.prepare()
 
+    def test_legacy_and_mixed_builds_fail_before_staging_or_storage_access(self):
+        for brands in (("nusa-panel",), ("qonpanel",), ("qonpanel", "nusa-panel"),
+                       ("qinpanel", "nusa-panel"), ("qinpanel", "qonpanel", "nusa-panel")):
+            with self.subTest(brands=brands):
+                for path in self.directory.iterdir():
+                    path.unlink()
+                for brand in brands:
+                    for target in pub.TARGETS:
+                        self.archive(brand, target)
+                self.checksums()
+                original = {path.name: path.read_bytes() for path in self.directory.iterdir()}
+                argv = ["publish-distribution.py", "--directory", str(self.directory), "--tag", TAG,
+                        "--github-directory", str(self.github_directory)]
+                with patch.object(pub.sys, "argv", argv), patch.dict(pub.os.environ, {"QONPANEL_RELEASE_BASE_URL": BASE}), patch.object(pub, "Store") as store:
+                    with self.assertRaisesRegex(pub.PublicationError, "Historical artifact names cannot be published"):
+                        pub.main()
+                store.assert_not_called()
+                self.assertFalse(self.github_directory.exists())
+                self.assertEqual(original, {path.name: path.read_bytes() for path in self.directory.iterdir()})
+
+    def test_github_staging_rejects_historical_names_before_creating_output(self):
+        manifest, _ = self.prepare()
+        value = json.loads(manifest)
+        for brand in ("nusa-panel", "qonpanel"):
+            value["assets"][0]["name"] = f"{brand}-{TAG}-{pub.TARGETS[0]}.tar.gz"
+            with self.subTest(brand=brand), self.assertRaisesRegex(pub.PublicationError, "GitHub assets must use Qinpanel filenames"):
+                pub.prepare_github_assets(self.directory, self.github_directory, json.dumps(value).encode())
+            self.assertFalse(self.github_directory.exists())
+
+    def test_legacy_checksum_entry_without_its_archive_is_rejected(self):
+        checksums = self.directory / "SHA256SUMS"
+        original = checksums.read_bytes()
+        for brand in ("nusa-panel", "qonpanel"):
+            checksums.write_bytes(original + b"0" * 64 + f"  {brand}-{TAG}-{pub.TARGETS[0]}.tar.gz\n".encode())
+            with self.subTest(brand=brand), self.assertRaisesRegex(pub.PublicationError, "Checksum set does not match"):
+                self.prepare()
+
     def test_github_staging_refuses_existing_output_and_changed_archives(self):
-        self.add_canonical_archives()
         manifest, _ = self.prepare()
         self.github_directory.mkdir()
         marker = self.github_directory / "existing"
@@ -159,7 +188,6 @@ class PublicationTests(unittest.TestCase):
         self.assertFalse((self.github_directory.parent / "forged").exists())
 
     def test_github_staging_cannot_add_outputs_inside_the_verified_distribution(self):
-        self.add_canonical_archives()
         manifest, _ = self.prepare()
         original = {path.name for path in self.directory.iterdir()}
         for destination in (self.directory, self.directory / "github"):
@@ -170,19 +198,18 @@ class PublicationTests(unittest.TestCase):
     def test_metadata_matches_all_archives_and_installer_pins_the_same_source(self):
         manifest, installer = self.prepare()
         value = json.loads(manifest)
-        self.assertEqual(len(value["assets"]), 5)
+        self.assertEqual(len(value["assets"]), 3)
         self.assertFalse(value["draft"])
         self.assertIn(("PACKAGED_RELEASE_BASE_URL='" + BASE + "'").encode(), installer)
         self.assertNotIn(b"SUPABASE_SERVICE_ROLE_KEY", installer + manifest)
 
-    def test_old_artifact_resume_keeps_its_installer_bytes_and_release_identity(self):
+    def test_qinpanel_artifact_resume_keeps_its_bundled_installer_bytes_and_identity(self):
         current_bootstrap = self.bootstrap
         legacy = Path(self.temporary.name) / "old-bootstrap.sh"
         legacy.write_text(current_bootstrap.read_text().replace("Qinpanel", "QonPanel"))
         self.bootstrap = legacy
-        for brand in ("qonpanel", "nusa-panel"):
-            for target in pub.TARGETS:
-                self.archive(brand, target)
+        for target in pub.TARGETS:
+            self.archive("qinpanel", target)
         self.checksums()
         legacy.unlink()  # Only explicit release artifacts are accepted by prepare.
         self.bootstrap = current_bootstrap
@@ -196,7 +223,7 @@ class PublicationTests(unittest.TestCase):
         altered = Path(self.temporary.name) / "altered-bootstrap.sh"
         altered.write_text(current.read_text() + "\n# Different source generation\n")
         self.bootstrap = altered
-        self.archive("qonpanel", pub.TARGETS[0])
+        self.archive("qinpanel", pub.TARGETS[0])
         altered.unlink()
         self.bootstrap = current
         self.checksums()
@@ -206,11 +233,11 @@ class PublicationTests(unittest.TestCase):
     def test_no_source_debug_maps_credentials_or_unexpected_files_are_published(self):
         for extra in ["src/main.rs", ".env", "web/dist/index.js.map", "docs/private.md", ".git/config", "web/dist/source.tsx"]:
             with self.subTest(extra=extra):
-                self.archive("qonpanel", pub.TARGETS[0], extra)
+                self.archive("qinpanel", pub.TARGETS[0], extra)
                 self.checksums()
                 with self.assertRaises(ValueError):
                     self.prepare()
-        self.archive("qonpanel", pub.TARGETS[0])
+        self.archive("qinpanel", pub.TARGETS[0])
         self.checksums()
         (self.directory / "source.zip").write_bytes(b"private")
         with self.assertRaises(ValueError):
@@ -221,7 +248,7 @@ class PublicationTests(unittest.TestCase):
         package.write_bytes(package.read_bytes() + b"changed")
         with self.assertRaises(ValueError):
             self.prepare()
-        self.archive("qonpanel", pub.TARGETS[0], base="https://wrong.example.com")
+        self.archive("qinpanel", pub.TARGETS[0], base="https://wrong.example.com")
         self.checksums()
         with self.assertRaises(ValueError):
             self.prepare()
@@ -244,7 +271,7 @@ class PublicationTests(unittest.TestCase):
             if conflict:
                 store.objects["releases/" + TAG + "/SHA256SUMS"] = b"different bytes"
             else:
-                store.fail = "qonpanel-"
+                store.fail = "qinpanel-"
             with patch.object(pub, "public_digest", store.digest), patch.object(pub, "public_checksum_bytes", store.read), self.assertRaises(ValueError):
                 pub.publish(store, self.directory, TAG, BASE, manifest, installer)
             self.assertEqual(store.objects["latest.json"], b"old stable metadata")
