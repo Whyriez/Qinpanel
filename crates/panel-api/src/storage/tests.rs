@@ -383,6 +383,55 @@ async fn managed_downloads_use_owner_proxy_without_public_s3_presigning() {
             .expect("calls")
             .contains(&"download")
     );
+    let url = body["url"].as_str().expect("proxy URL");
+    for actor in ["admin", "bob"] {
+        let expected = if actor == "admin" {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        assert_eq!(
+            ctx.call("GET", url, Some(actor), false, json!({})).await.0,
+            expected
+        );
+    }
+    let response = ctx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(url)
+                .header("host", "panel.example.test")
+                .header("cookie", format!("{SESSION_COOKIE_NAME}=token-alice"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        response.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .expect("disposition")
+            .starts_with("attachment;")
+    );
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+        axum::body::Bytes::from_static(b"fixture file")
+    );
+    assert!(
+        ctx.runtime
+            .calls
+            .lock()
+            .expect("calls")
+            .contains(&"read_object")
+    );
 }
 
 #[tokio::test]

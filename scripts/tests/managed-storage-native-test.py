@@ -85,6 +85,27 @@ def request(method, path, keys=None, body=b""):
         connection.close()
 
 
+def presigned_get(path, keys, now=None, host=HOST):
+    """Native engine verifies query authentication separately from header signing."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    timestamp, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+    scope = f"{day}/us-east-1/s3/aws4_request"
+    values = {
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+        "X-Amz-Credential": f"{keys['access_key']}/{scope}",
+        "X-Amz-Date": timestamp, "X-Amz-Expires": "60",
+        "X-Amz-SignedHeaders": "host", "response-content-disposition": "attachment",
+    }
+    query = urllib.parse.urlencode(sorted(values.items()), quote_via=urllib.parse.quote, safe="-_.~")
+    canonical = f"GET\n{path}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD"
+    text = f"AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{hashlib.sha256(canonical.encode()).hexdigest()}"
+    signing = ("AWS4" + keys["secret_key"]).encode()
+    for part in (day, "us-east-1", "s3", "aws4_request"):
+        signing = hmac.new(signing, part.encode(), hashlib.sha256).digest()
+    signature = hmac.new(signing, text.encode(), hashlib.sha256).hexdigest()
+    return f"{path}?{query}&X-Amz-Signature={signature}"
+
+
 def main():
     if os.environ.get("QONPANEL_DISPOSABLE_CI") != "1" or os.environ.get("GITHUB_ACTIONS") != "true" or sys.platform != "linux" or os.geteuid() != 0:
         raise SystemExit("Only an explicitly authorized disposable GitHub Linux VM may run this test.")
@@ -126,6 +147,12 @@ def main():
             assert request("GET", "/alice-media?list-type=2", alice)[0] == 200
             assert request("PUT", "/alice-media/nested/hello%20world.txt", alice, b"Qinpanel native S3 fixture")[0] in (200, 201)
             assert request("GET", "/alice-media/nested/hello%20world.txt", alice) == (200, b"Qinpanel native S3 fixture")
+            signed = presigned_get("/alice-media/nested/hello%20world.txt", alice)
+            assert request("GET", signed) == (200, b"Qinpanel native S3 fixture"), "Fresh query-signed GET must read the actual object through TLS Nginx"
+            assert request("GET", signed.rsplit("=", 1)[0] + "=" + "0" * 64)[0] == 403, "Invalid signatures must remain denied"
+            expired = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+            assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", alice, expired))[0] == 403
+            assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", alice, host="different.example.test"))[0] == 403, "A rewritten signed Host must not authorize the request"
             assert control({"action": "decommission", "connection_id": identities[0][0], "owner_id": 2, "bucket": "alice-media"}) == {"removed": False, "not_empty": True}
             assert request("GET", "/alice-media/nested/hello%20world.txt")[0] == 403
             for method, path in [("GET", "/bob-media?list-type=2"), ("PUT", "/bob-media/forbidden"), ("GET", "/bob-media/forbidden"), ("DELETE", "/bob-media/forbidden"), ("PUT", "/another-bucket"), ("DELETE", "/alice-media"), ("PUT", "/alice-media?policy")]:
@@ -141,6 +168,8 @@ def main():
             assert control({"action": "application_key", "connection_id": identities[0][0], "owner_id": 2, "bucket": "alice-media", "generation": 2, "credentials": json.dumps(rotated)})["ready"]
             assert request("GET", "/alice-media/nested/hello%20world.txt", alice)[0] == 403
             assert request("GET", "/alice-media/nested/hello%20world.txt", rotated)[0] == 200
+            assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", alice))[0] == 403, "A fresh query signed with the revoked key must fail"
+            assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", rotated)) == (200, b"Qinpanel native S3 fixture")
             assert request("GET", "/bob-media?list-type=2", bob)[0] == 200
             assert request("DELETE", "/alice-media/nested/hello%20world.txt", rotated)[0] == 204
             assert control({"action": "decommission", "connection_id": identities[0][0], "owner_id": 2, "bucket": "alice-media"})["removed"]
