@@ -147,10 +147,17 @@ impl ReliabilityManager {
     }
 
     fn nginx_boot_status(&self) -> NginxBootStatus {
-        let Ok(output) = self
-            .runner
-            .run_command("systemctl", &["is-enabled", "nginx.service"])
-        else {
+        // is-enabled returns nonzero for disabled/masked, and SystemRunner
+        // turns that into Err without stdout. Read the state as a property.
+        let Ok(output) = self.runner.run_command(
+            "systemctl",
+            &[
+                "show",
+                "--property=UnitFileState",
+                "--value",
+                "nginx.service",
+            ],
+        ) else {
             return NginxBootStatus::Unknown;
         };
         match String::from_utf8_lossy(&output.stdout).trim() {
@@ -1037,7 +1044,7 @@ use crate::nftables as panel_agent_nftables;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system::MockSystemRunner;
+    use crate::system::{MockAction, MockSystemRunner};
     use tempfile::tempdir;
 
     #[test]
@@ -1087,24 +1094,26 @@ mod tests {
     fn doctor_distinguishes_running_nginx_from_persistent_boot_enablement() {
         for (state, exit, enable_exit, expected_status, fixable, success) in [
             ("enabled", 0, 0, DoctorCheckStatus::Pass, false, true),
-            ("disabled", 1, 0, DoctorCheckStatus::Warn, true, true),
+            ("disabled", 0, 0, DoctorCheckStatus::Warn, true, true),
             ("enabled-runtime", 0, 0, DoctorCheckStatus::Warn, true, true),
-            ("disabled", 1, 1, DoctorCheckStatus::Warn, true, false),
-            ("masked", 1, 0, DoctorCheckStatus::Warn, false, false),
+            ("disabled", 0, 1, DoctorCheckStatus::Warn, true, false),
+            ("masked", 0, 0, DoctorCheckStatus::Warn, false, false),
             (
                 "masked-runtime",
-                1,
+                0,
                 0,
                 DoctorCheckStatus::Warn,
                 false,
                 false,
             ),
+            ("unexpected", 0, 0, DoctorCheckStatus::Warn, false, false),
+            ("disabled", 1, 0, DoctorCheckStatus::Warn, false, false),
             ("unexpected", 1, 0, DoctorCheckStatus::Warn, false, false),
         ] {
             let temp = tempdir().expect("tempdir");
             let runner = Arc::new(MockSystemRunner::new());
             runner.set_response(
-                "systemctl is-enabled nginx.service",
+                "systemctl show --property=UnitFileState --value nginx.service",
                 exit,
                 state.as_bytes(),
                 b"",
@@ -1128,14 +1137,20 @@ mod tests {
                 .iter()
                 .find(|check| check.id == "nginx_boot_enabled")
                 .expect("boot check");
-            assert_eq!(boot.status, expected_status);
-            assert_eq!(boot.fixable, fixable);
+            assert_eq!(
+                boot.status, expected_status,
+                "state={state}, probe_exit={exit}"
+            );
+            assert_eq!(boot.fixable, fixable, "state={state}, probe_exit={exit}");
             let result = manager
                 .fix_doctor(&SystemDoctorFixRequest {
                     target_checks: vec!["nginx_boot_enabled".into()],
                 })
                 .expect("boot fix");
-            assert_eq!(result.all_fixed, success);
+            assert_eq!(
+                result.all_fixed, success,
+                "state={state}, probe_exit={exit}, enable_exit={enable_exit}"
+            );
             let commands = runner.get_commands();
             assert_eq!(
                 commands
@@ -1205,17 +1220,43 @@ mod tests {
         let runner = Arc::new(MockSystemRunner::new());
         let path = temp.path().join("rules.nft");
         let rules = b"fixture existing tenant 10001 port 20001";
+        runner.set_response("systemctl is-active nginx", 0, b"active", b"");
+        runner.set_response(
+            "systemctl show --property=UnitFileState --value nginx.service",
+            0,
+            b"enabled",
+            b"",
+        );
+        runner.add_existing_path(temp.path().join("backups"));
+        runner.add_existing_path(Path::new("/run/panel/agent.sock"));
         runner.set_file_content(&path, rules);
         let nft = Arc::new(NftablesManager::with_path(runner.clone(), &path));
         let manager = ReliabilityManager::new(runner.clone(), temp.path(), nft);
-        manager
+        let result = manager
             .fix_doctor(&SystemDoctorFixRequest::default())
             .expect("generic fix");
-        assert!(!runner.get_commands().iter().any(
-            |command| command.starts_with("systemctl restart")
-                || command.starts_with("systemctl start")
-                || command.starts_with("nft ")
-        ));
+        assert!(result.all_fixed);
+        assert!(result.results.is_empty());
+        assert!(!runner.get_commands().iter().any(|command| {
+            command.starts_with("systemctl restart ")
+                || command.starts_with("systemctl start ")
+                || command.starts_with("systemctl stop ")
+                || command.starts_with("systemctl reload ")
+        }));
+        // Doctor checks the binary version; only this read-only nft command is allowed.
+        assert!(
+            runner
+                .get_commands()
+                .iter()
+                .filter(|command| command.starts_with("nft "))
+                .all(|command| command == "nft --version")
+        );
+        let actions = runner.recorded_actions();
+        assert!(
+            actions
+                .iter()
+                .all(|action| matches!(action, MockAction::Command { .. }))
+        );
         let result = manager
             .fix_doctor(&SystemDoctorFixRequest {
                 target_checks: vec!["nftables_loopback_guard".into()],
@@ -1223,12 +1264,7 @@ mod tests {
             .expect("firewall fix");
         assert!(!result.all_fixed);
         assert_eq!(runner.read_file(&path).expect("rules"), rules.to_vec());
-        assert!(
-            !runner
-                .get_commands()
-                .iter()
-                .any(|command| command.starts_with("nft "))
-        );
+        assert_eq!(runner.recorded_actions(), actions);
     }
 
     #[test]

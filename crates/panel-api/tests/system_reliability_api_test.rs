@@ -400,8 +400,12 @@ async fn doctor_fix_does_not_claim_success_when_agent_is_offline() {
 #[tokio::test]
 async fn doctor_fix_enables_nginx_boot_without_restarting_a_running_proxy() {
     let ctx = setup_test_context().await;
-    ctx.runner
-        .set_response("systemctl is-enabled nginx.service", 1, b"disabled", b"");
+    ctx.runner.set_response(
+        "systemctl show --property=UnitFileState --value nginx.service",
+        0,
+        b"disabled",
+        b"",
+    );
     let response = ctx
         .app
         .clone()
