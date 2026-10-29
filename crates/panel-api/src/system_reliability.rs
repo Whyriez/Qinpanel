@@ -1,6 +1,11 @@
 //! REST API handlers and DTOs for system reliability, doctor, reconcile, and system backups.
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use panel_core::doctor::{DoctorCheckCategory, DoctorCheckItem, DoctorCheckStatus, DoctorReport};
 use panel_core::reconcile::{DriftItem, DriftType, ReconcileReport};
 use panel_core::system_backup::{SystemBackupSummary, SystemBackupVerificationResult};
@@ -18,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 use utoipa::ToSchema;
 
-use crate::routes::AppState;
+use crate::{auth::RequireAdminCsrf, routes::AppState};
 
 fn map_proto_category(cat: &str) -> DoctorCheckCategory {
     match cat {
@@ -236,47 +241,136 @@ async fn recheck_db_integrity_post_fix(pool: &panel_db::DbPool) -> DoctorCheckIt
     }
 }
 
-async fn recover_jobs_safe(job_repo: &SqliteJobRepository) -> u64 {
+async fn recover_jobs_safe(job_repo: &SqliteJobRepository) -> Result<u64, Response> {
     match job_repo.recover_interrupted_jobs().await {
         Ok(n) => {
             info!("Memulihkan {} pekerjaan terinterupsi", n);
-            n
+            Ok(n)
         }
         Err(e) => {
             error!("Gagal memulihkan pekerjaan terinterupsi: {}", e);
-            0
+            Err(doctor_failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Status pekerjaan belum dapat dipulihkan. Muat ulang diagnosis sebelum mencoba lagi.",
+            ))
         }
     }
+}
+
+fn doctor_failure(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({"error":message}))).into_response()
 }
 
 #[utoipa::path(
     post,
     path = "/api/v1/system/doctor/fix",
     responses(
-        (status = 200, description = "Remediated system health doctor report", body = DoctorReport)
+        (status = 200, description = "Remediated system health doctor report", body = DoctorReport),
+        (status = 403, description = "Administrator session and CSRF required"),
+        (status = 422, description = "Host remediation rejected"),
+        (status = 503, description = "Agent unavailable or remediation result unconfirmed")
     ),
     tag = "system"
 )]
-pub async fn fix_system_doctor_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn fix_system_doctor_handler(
+    State(state): State<AppState>,
+    _auth: RequireAdminCsrf,
+) -> Response {
+    let before = match state
+        .agent_client
+        .system_doctor_check(SystemDoctorCheckRequest {})
+        .await
+    {
+        Ok(report) => report,
+        Err(_) => {
+            return doctor_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Diagnosis agent belum tersedia. Tidak menjalankan perbaikan host; periksa panel-agent dan muat ulang diagnosis.",
+            );
+        }
+    };
+    let needs_firewall = before
+        .checks
+        .iter()
+        .any(|check| check.id == "nftables_loopback_guard" && check.status != "pass");
+    let target_checks: Vec<_> = before
+        .checks
+        .into_iter()
+        .filter(|check| {
+            check.fixable && check.status != "pass" && check.id != "nftables_loopback_guard"
+        })
+        .map(|check| check.id)
+        .collect();
+    if !target_checks.is_empty() {
+        match state
+            .agent_client
+            .system_doctor_fix(SystemDoctorFixRequest { target_checks })
+            .await
+        {
+            Ok(result) if result.all_fixed && result.results.iter().all(|item| item.success) => {}
+            Ok(_) => {
+                return doctor_failure(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Sebagian perbaikan host gagal. Muat ulang diagnosis dan periksa log layanan; perbaikan tidak dinyatakan berhasil.",
+                );
+            }
+            Err(_) => {
+                return doctor_failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Respons perbaikan agent terputus; hasil belum terkonfirmasi. Muat ulang diagnosis sebelum mencoba lagi.",
+                );
+            }
+        }
+    }
+    if needs_firewall {
+        let bindings = match crate::security_hardening::automatic_bindings(&state.pool).await {
+            Ok(bindings) => bindings.into_iter().map(Into::into).collect(),
+            Err(message) => return doctor_failure(StatusCode::CONFLICT, &message),
+        };
+        match state
+            .agent_client
+            .nftables_sync(panel_proto::NftablesSyncRequest { bindings })
+            .await
+        {
+            Ok(result) if result.success => {}
+            Ok(_) => {
+                return doctor_failure(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Sinkronisasi nftables gagal. Muat ulang diagnosis dan periksa log panel-agent.",
+                );
+            }
+            Err(error) => return crate::security_hardening::nftables_failure(error),
+        }
+    }
     let job_repo = state.job_runner.job_repo.clone();
 
     // 1. Recover interrupted jobs
-    let recovered = recover_jobs_safe(&job_repo).await;
+    let recovered = match recover_jobs_safe(&job_repo).await {
+        Ok(recovered) => recovered,
+        Err(response) => return response,
+    };
 
     // 2. SQLite WAL truncate checkpoint
-    let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
-        .execute(&state.pool)
-        .await;
+    match sqlx::query_as::<_, (i64, i64, i64)>("PRAGMA wal_checkpoint(TRUNCATE);")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok((0, _, _)) => {}
+        Ok(_) => {
+            return doctor_failure(
+                StatusCode::CONFLICT,
+                "Checkpoint database masih sibuk. Muat ulang diagnosis setelah aktivitas database selesai.",
+            );
+        }
+        Err(_) => {
+            return doctor_failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Checkpoint database gagal. Periksa integritas dan aktivitas database sebelum mencoba lagi.",
+            );
+        }
+    }
 
-    // 3. Request agent remediation
-    let _ = state
-        .agent_client
-        .system_doctor_fix(SystemDoctorFixRequest {
-            target_checks: vec![],
-        })
-        .await;
-
-    // 4. Return refreshed doctor report
+    // Return a fresh report only after all requested remediations acknowledged.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -301,20 +395,28 @@ pub async fn fix_system_doctor_handler(State(state): State<AppState>) -> impl In
     });
 
     // Refresh agent status
-    if let Ok(agent_resp) = state
+    match state
         .agent_client
         .system_doctor_check(SystemDoctorCheckRequest {})
         .await
     {
-        for agent_dto in agent_resp.checks {
-            if !checks.iter().any(|c| c.id == agent_dto.id) {
-                checks.push(map_dto_to_check_item(agent_dto));
+        Ok(agent_resp) => {
+            for agent_dto in agent_resp.checks {
+                if !checks.iter().any(|c| c.id == agent_dto.id) {
+                    checks.push(map_dto_to_check_item(agent_dto));
+                }
             }
+        }
+        Err(_) => {
+            return doctor_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Perbaikan sudah diminta, tetapi diagnosis akhir belum tersedia. Hasil belum terkonfirmasi; muat ulang diagnosis tanpa mengirim ulang perbaikan.",
+            );
         }
     }
 
     let report = DoctorReport::new(now, checks);
-    (StatusCode::OK, Json(report))
+    (StatusCode::OK, Json(report)).into_response()
 }
 
 #[utoipa::path(

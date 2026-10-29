@@ -99,9 +99,13 @@ pub async fn overview(
     _admin: RequireAdmin,
 ) -> Result<Response, Error> {
     let row = binding(&state.pool).await?;
-    let dns = services.runtime.dns_status().await.unwrap_or(Value::Null);
+    let dns = services.runtime.dns_status().await;
+    let available = dns
+        .as_ref()
+        .is_ok_and(|value| value["configured"].is_boolean());
+    let dns = dns.unwrap_or(Value::Null);
     Ok(ok(
-        json!({"certificate":public(&row),"dns":{"configured":dns["configured"]==true,"zone_name":dns["zone_name"]}}),
+        json!({"certificate":public(&row),"dns":{"available":available,"configured":dns["configured"]==true,"zone_name":dns["zone_name"]}}),
     ))
 }
 #[derive(Serialize, Deserialize)]

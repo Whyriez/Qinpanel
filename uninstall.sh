@@ -100,6 +100,7 @@ rm -f /etc/systemd/system/panel-api.service /etc/systemd/system/panel-agent.serv
 rm -f /etc/systemd/system/qonpanel-server-backup.service /usr/local/libexec/qonpanel-server-backup /usr/local/libexec/qonpanel-selinux /usr/local/libexec/qonpanel-mail-auth
 rm -f /etc/systemd/system/panel-update.service /usr/local/libexec/panel-update-worker /usr/local/libexec/panel-bootstrap
 rm -f /etc/systemd/system/panel-fpm@.service.d/10-panel-runtime-order.conf /etc/systemd/system/site-.service.d/10-panel-runtime-order.conf
+rm -f /etc/systemd/system/nginx.service.d/10-panel-startup.conf
 rm -f /etc/systemd/system/panel-db-web.service /etc/phpmyadmin/conf.d/zz-panel.php /usr/lib/tmpfiles.d/panel-db-web.conf
 rm -rf /usr/share/panel/db-web /run/panel-db-web /var/lib/panel-db-web
 systemctl daemon-reload

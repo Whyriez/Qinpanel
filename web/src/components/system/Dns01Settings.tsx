@@ -71,7 +71,7 @@ export function Dns01Settings({ onChanged }: { onChanged?: () => void }) {
   };
   return <section aria-labelledby={`${id}-title`} className="space-y-4 border-t border-[var(--line)] pt-6">
     <div className="flex flex-wrap items-center justify-between gap-3"><h3 id={`${id}-title`} className="font-semibold">Sertifikat hostname melalui DNS-01</h3><button className={button} disabled={busy || loading} onClick={() => { setLoading(true); void load(); }}>Muat ulang DNS-01</button></div>
-    <p className="text-sm text-[var(--ink-muted)]">Terbitkan TLS origin untuk hostname project di belakang Tunnel tanpa membuka port publik 80. Sertifikat dipasang pada Nginx situs; verifikasi TLS origin tetap aktif. Sertifikat panel dan IP menggunakan pengaturan konektivitas terpisah.</p>
+    <p className="text-sm text-[var(--ink-muted)]">Hubungkan token DNS-01 untuk sertifikat project dan Storage Qinpanel, termasuk akses melalui Tunnel tanpa membuka port publik 80. Koneksi Tunnel tidak menghubungkan token DNS-01 ini secara otomatis. Penerbitan hostname di halaman ini memasang sertifikat pada Nginx situs; verifikasi TLS origin tetap aktif. Untuk storage, kembali ke Generate &amp; aktifkan setelah token tersimpan. Sertifikat panel dan IP menggunakan pengaturan konektivitas terpisah.</p>
     <p className="text-sm text-[var(--ink-muted)]">Gunakan token Cloudflare khusus dengan Zone DNS Edit dan Zone Read, dibatasi hanya satu zona. Token disimpan terenkripsi pada agent. Jangan gunakan token Tunnel atau Global API Key. Delegasi CNAME/NS dan wildcard belum didukung.</p>
     {loading && <p role="status" className="text-sm">Memuat DNS-01…</p>}
     {error && <p role="alert" className="text-sm text-[var(--danger)] break-words">{error}</p>}

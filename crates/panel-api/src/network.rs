@@ -216,17 +216,29 @@ pub async fn validate_publication(
     }
     Ok(command)
 }
-#[utoipa::path(get, path="/api/v1/network/cloudflare", responses((status=200,description="Cloudflare connection and local connector status; no credentials")), tag="network")]
+fn cloudflare_failure(error: crate::agent_client::AgentClientError) -> Error {
+    use crate::agent_client::AgentClientError;
+    match error {
+        AgentClientError::AgentError(_) => fail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Agent menolak pemeriksaan atau operasi Cloudflare. Periksa kredensial terenkripsi, inventaris tunnel dan log panel-agent. Jangan memasang ulang konektor untuk sekadar memuat status.",
+        ),
+        _ => fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Koneksi panel-api ke panel-agent belum tersedia atau terputus. Status Cloudflare belum dapat dipastikan; muat ulang status setelah layanan panel kembali tersedia.",
+        ),
+    }
+}
+
+#[utoipa::path(get, path="/api/v1/network/cloudflare", responses((status=200,description="Cloudflare connection and local connector status; no credentials"),(status=422,description="Agent rejected local status inspection"),(status=503,description="Agent unavailable or status deadline exceeded")), tag="network")]
 pub async fn cloudflare_status(
     State(state): State<AppState>,
     RequireAdmin(_user): RequireAdmin,
 ) -> Result<Json<Value>, Error> {
-    state
-        .agent_client
-        .cloudflare(CloudflareRequest::Status)
-        .await
-        .map(Json)
-        .map_err(|e| fail(StatusCode::BAD_GATEWAY, e.to_string()))
+    tokio::time::timeout(std::time::Duration::from_secs(8), state.agent_client.cloudflare(CloudflareRequest::Status))
+        .await.map_err(|_| fail(StatusCode::SERVICE_UNAVAILABLE,
+            "Pemeriksaan status Cloudflare melewati batas 8 detik. Tidak ada perintah perubahan konektor yang dikirim; coba muat ulang status dan periksa panel-agent."))?
+        .map(Json).map_err(cloudflare_failure)
 }
 #[utoipa::path(post, path="/api/v1/network/cloudflare", request_body=CloudflareRequest, responses((status=200,description="Cloudflare query or DNS mutation result"),(status=202,description="Tunnel operation queued")), tag="network")]
 pub async fn cloudflare_command(
@@ -285,10 +297,7 @@ pub async fn cloudflare_command(
             None,
         );
     }
-    Ok((
-        StatusCode::OK,
-        Json(response.map_err(|e| fail(StatusCode::BAD_GATEWAY, e.to_string()))?),
-    ))
+    Ok((StatusCode::OK, Json(response.map_err(cloudflare_failure)?)))
 }
 #[utoipa::path(post, path="/api/v1/network/cloudflare/install", responses((status=202,description="Signed-repository connector installation queued")), tag="network")]
 pub async fn install(
@@ -313,4 +322,29 @@ pub async fn install(
         StatusCode::ACCEPTED,
         Json(serde_json::to_value(job).map_err(db_error)?),
     ))
+}
+
+#[cfg(test)]
+mod cloudflare_failure_tests {
+    use super::*;
+    use crate::agent_client::AgentClientError;
+
+    #[test]
+    fn cloudflare_errors_are_safe_service_or_validation_responses_instead_of_502() {
+        let (status, Json(body)) = cloudflare_failure(AgentClientError::AgentError(
+            "fixture-token-must-not-leak".into(),
+        ));
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!body.to_string().contains("fixture-token-must-not-leak"));
+        let (status, Json(body)) = cloudflare_failure(AgentClientError::Proto(
+            panel_proto::ProtoError::ConnectionClosed,
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("message")
+                .contains("panel-agent")
+        );
+    }
 }

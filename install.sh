@@ -37,6 +37,7 @@ MANAGED_FILES=(
     /etc/systemd/system/panel-proc-hardening.service
     /etc/systemd/system/panel-fpm@.service.d/10-panel-runtime-order.conf
     /etc/systemd/system/site-.service.d/10-panel-runtime-order.conf
+    /etc/systemd/system/nginx.service.d/10-panel-startup.conf
     /etc/nginx/sites-available/nusa-panel.conf /etc/nginx/sites-enabled/nusa-panel.conf
     /etc/nginx/conf.d/00-qpanel-reject-unknown.conf
     /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default
@@ -215,6 +216,7 @@ find_release() {
         templates/systemd/panel-agent.service \
         templates/systemd/panel-proc-hardening.service \
         templates/systemd/panel-runtime-order.conf \
+        templates/systemd/nginx-panel-startup.conf \
         templates/systemd/panel-update.service scripts/bootstrap-install.sh scripts/panel-update-worker.sh \
         templates/systemd/qonpanel-server-backup.service scripts/server-backup-worker.py \
         templates/nginx/nusa-panel.conf \
@@ -442,6 +444,8 @@ install_binaries_and_units() {
     install -d -o root -g root -m 0755 /etc/systemd/system/panel-fpm@.service.d /etc/systemd/system/site-.service.d
     install -o root -g root -m 0644 "$SCRIPT_DIR/templates/systemd/panel-runtime-order.conf" /etc/systemd/system/panel-fpm@.service.d/10-panel-runtime-order.conf
     install -o root -g root -m 0644 "$SCRIPT_DIR/templates/systemd/panel-runtime-order.conf" /etc/systemd/system/site-.service.d/10-panel-runtime-order.conf
+    install -d -o root -g root -m 0755 /etc/systemd/system/nginx.service.d
+    install -o root -g root -m 0644 "$SCRIPT_DIR/templates/systemd/nginx-panel-startup.conf" /etc/systemd/system/nginx.service.d/10-panel-startup.conf
     install -o root -g root -m 0644 "$SCRIPT_DIR/templates/systemd/panel-update.service" /etc/systemd/system/panel-update.service
     install -o root -g root -m 0644 "$SCRIPT_DIR/templates/systemd/qonpanel-server-backup.service" /etc/systemd/system/qonpanel-server-backup.service
     install -d -o root -g root -m 0755 /usr/local/libexec

@@ -56,6 +56,7 @@ export const SystemReliabilityCard: React.FC<SystemReliabilityCardProps> = ({
     try {
       setLoading(true);
       setError(null);
+      setSuccessMessage(null);
       const res = await fetchSystemDoctorReport();
       setDoctorReport(res);
       if (onRefresh) onRefresh();
@@ -106,9 +107,14 @@ export const SystemReliabilityCard: React.FC<SystemReliabilityCardProps> = ({
     try {
       setActionLoading(true);
       setError(null);
+      setSuccessMessage(null);
       const res = await fixSystemDoctor();
       setDoctorReport(res);
-      setSuccessMessage('Perbaikan sistem otomatis berhasil dijalankan.');
+      if (res.total_warnings === 0 && res.total_failures === 0) {
+        setSuccessMessage('Perbaikan selesai. Seluruh pemeriksaan diagnosis lolos.');
+      } else {
+        setError(`Diagnosis setelah perbaikan masih menemukan ${res.total_warnings} peringatan dan ${res.total_failures} kegagalan. Periksa daftar parameter kesehatan sistem.`);
+      }
     } catch (err: any) {
       setError(err?.message || 'Gagal menjalankan perbaikan otomatis.');
     } finally {
@@ -349,7 +355,7 @@ export const SystemReliabilityCard: React.FC<SystemReliabilityCardProps> = ({
                 </div>
                 <button
                   onClick={handleFixDoctor}
-                  disabled={actionLoading}
+                  disabled={loading || actionLoading || !doctorReport.checks.some(check => check.fixable && check.status !== 'pass')}
                   className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md bg-[var(--primary)] text-[var(--primary-foreground)] hover:bg-[var(--primary-hover)] transition-colors disabled:opacity-50"
                   data-testid="doctor-fix-button"
                 >

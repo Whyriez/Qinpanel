@@ -53,12 +53,13 @@ export interface StorageTlsCertificate {
   state: 'idle' | 'queued' | 'issuing' | 'configuring' | 'active' | 'failed' | 'manual';
   auto_renew: boolean; not_after: number | null; renew_at: number | null; job_id: string | null; error: string | null;
 }
-export interface StorageTlsInventory { certificate: StorageTlsCertificate; dns: { configured: boolean; zone_name: string | null } }
+export interface StorageTlsInventory { certificate: StorageTlsCertificate; dns: { available?: boolean; configured: boolean; zone_name: string | null } }
 export async function fetchStorageTls(signal?: AbortSignal): Promise<StorageTlsInventory> {
   const value=await request<StorageTlsInventory>(`${root}/managed/tls`, { signal });
   if (!value?.certificate || !Number.isSafeInteger(value.certificate.revision) || value.certificate.revision < 1
     || !['idle','queued','issuing','configuring','active','failed','manual'].includes(value.certificate.state)
-    || typeof value.certificate.auto_renew !== 'boolean' || typeof value.dns?.configured !== 'boolean') {
+    || typeof value.certificate.auto_renew !== 'boolean' || typeof value.dns?.configured !== 'boolean'
+    || value.dns.available !== undefined && typeof value.dns.available !== 'boolean') {
     throw new Error('Status sertifikat storage tidak valid. Perbarui paket Qinpanel lengkap dan muat ulang.');
   }
   return value;

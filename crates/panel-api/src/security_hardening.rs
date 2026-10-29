@@ -233,7 +233,7 @@ pub async fn sync_nftables_loopback_handler(
     }
 }
 
-fn nftables_failure(error: crate::agent_client::AgentClientError) -> Response {
+pub(crate) fn nftables_failure(error: crate::agent_client::AgentClientError) -> Response {
     use crate::agent_client::AgentClientError;
     let (status, code, detail) = match error {
         AgentClientError::AgentError(message)
@@ -271,7 +271,9 @@ struct OwnedBinding {
     #[sqlx(flatten)]
     owner: panel_db::models::User,
 }
-async fn automatic_bindings(pool: &panel_db::DbPool) -> Result<Vec<TenantPortBindingDto>, String> {
+pub(crate) async fn automatic_bindings(
+    pool: &panel_db::DbPool,
+) -> Result<Vec<TenantPortBindingDto>, String> {
     let rows=sqlx::query_as::<_,OwnedBinding>("SELECT s.id AS site_id,s.settings_json,u.* FROM sites s JOIN users u ON u.id=s.user_id WHERE s.status='active' AND u.status='active' AND u.role='user' AND (s.kind IN ('nodejs','python') OR s.runtime IN ('nodejs','python'))")
         .fetch_all(pool).await.map_err(|_|"Pemetaan port tenant gagal dimuat; aturan tidak diubah.".to_owned())?;
     let mut ports = std::collections::BTreeMap::<u16, TenantPortBindingDto>::new();

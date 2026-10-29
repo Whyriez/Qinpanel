@@ -2110,9 +2110,15 @@ export async function fetchSystemDoctorReport(): Promise<DoctorReport> {
 }
 
 export async function fixSystemDoctor(): Promise<DoctorReport> {
-  return request<DoctorReport>('/api/v1/system/doctor/fix', {
-    method: 'POST',
-  });
+  try {
+    return await request<DoctorReport>('/api/v1/system/doctor/fix', { method: 'POST' });
+  } catch (error) {
+    const status = (error as { status?: number } | null)?.status;
+    if (status === 502 || status === 504 || error instanceof TypeError) {
+      throw new Error('Koneksi ke panel terputus. Hasil perbaikan belum terkonfirmasi; segarkan diagnosis sebelum mencoba lagi.');
+    }
+    throw error;
+  }
 }
 
 export async function fetchSystemReconcileReport(): Promise<ReconcileReport> {

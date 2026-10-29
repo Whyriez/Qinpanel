@@ -32,6 +32,14 @@ pub struct ReliabilityManager {
     nftables_manager: Arc<NftablesManager>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NginxBootStatus {
+    Enabled,
+    Disabled,
+    Masked,
+    Unknown,
+}
+
 impl ReliabilityManager {
     pub fn new(
         runner: Arc<dyn SystemRunner>,
@@ -138,6 +146,21 @@ impl ReliabilityManager {
         checks
     }
 
+    fn nginx_boot_status(&self) -> NginxBootStatus {
+        let Ok(output) = self
+            .runner
+            .run_command("systemctl", &["is-enabled", "nginx.service"])
+        else {
+            return NginxBootStatus::Unknown;
+        };
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "enabled" if output.status.success() => NginxBootStatus::Enabled,
+            "disabled" | "enabled-runtime" => NginxBootStatus::Disabled,
+            "masked" | "masked-runtime" => NginxBootStatus::Masked,
+            _ => NginxBootStatus::Unknown,
+        }
+    }
+
     fn check_services_and_runtime(&self) -> Vec<DoctorCheckItem> {
         let mut checks = Vec::new();
         let is_linux = cfg!(target_os = "linux");
@@ -163,9 +186,28 @@ impl ReliabilityManager {
             remediation_hint: if nginx_active {
                 None
             } else {
-                Some("Jalankan 'systemctl restart nginx' atau gunakan auto-fix".to_string())
+                Some("Periksa sintaks Nginx lalu jalankan 'systemctl start nginx' atau gunakan auto-fix".to_string())
             },
             fixable: true,
+        });
+
+        let boot = self.nginx_boot_status();
+        checks.push(DoctorCheckItem {
+            id: "nginx_boot_enabled".into(),
+            name: "Autostart Nginx saat boot".into(),
+            category: DoctorCheckCategory::Services,
+            status: if boot == NginxBootStatus::Enabled { DoctorCheckStatus::Pass } else { DoctorCheckStatus::Warn },
+            message: match boot {
+                NginxBootStatus::Enabled => "Nginx diaktifkan secara persisten untuk boot berikutnya.",
+                NginxBootStatus::Disabled => "Autostart Nginx belum aktif secara persisten; layanan dapat mati setelah reboot meskipun sekarang berjalan.",
+                NginxBootStatus::Masked => "Nginx di-mask oleh konfigurasi sistem. Tinjau kebijakan operator sebelum membuka mask.",
+                NginxBootStatus::Unknown => "Status autostart Nginx belum dapat dipastikan. Periksa systemctl is-enabled nginx.service.",
+            }.into(),
+            remediation_hint: (boot != NginxBootStatus::Enabled).then(|| {
+                if boot == NginxBootStatus::Disabled { "Gunakan perbaikan otomatis untuk mengaktifkan autostart tanpa restart Nginx." }
+                else { "Periksa unit/drop-in dan kebijakan systemd; status ini tidak diubah otomatis." }.into()
+            }),
+            fixable: boot == NginxBootStatus::Disabled,
         });
 
         let syntax_ok = matches!(
@@ -328,15 +370,19 @@ impl ReliabilityManager {
         req: &SystemDoctorFixRequest,
     ) -> Result<SystemDoctorFixResponse, AgentError> {
         let mut results = Vec::new();
-        let target_all = req.target_checks.is_empty();
+        let targets = if req.target_checks.is_empty() {
+            self.check_doctor(&SystemDoctorCheckRequest {})?
+                .checks
+                .into_iter()
+                .filter(|check| check.fixable && check.status != "pass")
+                .map(|check| check.id)
+                .collect()
+        } else {
+            req.target_checks.clone()
+        };
 
         // Fix 1: Ensure state directories
-        if target_all
-            || req
-                .target_checks
-                .iter()
-                .any(|c| c == "panel_state_directories")
-        {
+        if targets.iter().any(|c| c == "panel_state_directories") {
             let dirs = [
                 self.base_dir.join("backups"),
                 self.base_dir.join("optimizer"),
@@ -362,17 +408,30 @@ impl ReliabilityManager {
             });
         }
 
-        // Fix 2: Restart Nginx if service_nginx is targeted
-        if target_all || req.target_checks.iter().any(|c| c == "service_nginx") {
-            let res = self.runner.run_command("systemctl", &["restart", "nginx"]);
-            let (success, msg) = match res {
-                Ok(out) if out.status.success() => {
-                    (true, "Layanan Nginx berhasil di-restart".to_string())
-                }
-                _ => (
+        // Starting an inactive service never tears down an existing connection.
+        // A healthy Nginx must not be restarted by an unrelated remediation.
+        if targets.iter().any(|c| c == "service_nginx") {
+            let active = matches!(self.runner.run_command("systemctl", &["is-active", "nginx"]), Ok(out) if out.status.success());
+            let (success, msg) = if active {
+                (true, "Layanan Nginx sudah aktif; tidak diubah.".to_string())
+            } else if !matches!(self.runner.run_command("nginx", &["-t", "-c", "/etc/nginx/nginx.conf"]), Ok(out) if out.status.success())
+            {
+                (
                     false,
-                    "Gagal me-restart layanan Nginx (periksa status sistem)".to_string(),
-                ),
+                    "Sintaks Nginx tidak valid; layanan tidak diubah. Periksa konfigurasi Nginx."
+                        .to_string(),
+                )
+            } else {
+                match self.runner.run_command("systemctl", &["start", "nginx"]) {
+                    Ok(out) if out.status.success() => {
+                        (true, "Layanan Nginx berhasil diaktifkan.".to_string())
+                    }
+                    _ => (
+                        false,
+                        "Layanan Nginx gagal diaktifkan. Periksa status dan log nginx.service."
+                            .to_string(),
+                    ),
+                }
             };
             results.push(DoctorRemediationResultDto {
                 item_id: "service_nginx".to_string(),
@@ -381,28 +440,43 @@ impl ReliabilityManager {
             });
         }
 
-        // Fix 3: Ensure nftables table
-        if target_all
-            || req
-                .target_checks
-                .iter()
-                .any(|c| c == "nftables_loopback_guard")
-        {
-            let sync_res = self.nftables_manager.sync_bindings(&[]);
-            let (success, msg) = match sync_res {
-                Ok(cnt) => (
-                    true,
-                    format!(
-                        "Tabel loopback guard nftables diinisialisasi ({} aturan)",
-                        cnt.active_rules_count
+        if targets.iter().any(|c| c == "nginx_boot_enabled") {
+            let (success, message) = match self.nginx_boot_status() {
+                NginxBootStatus::Enabled => {
+                    (true, "Autostart Nginx sudah aktif; layanan tidak diubah.")
+                }
+                NginxBootStatus::Disabled => match self
+                    .runner
+                    .run_command("systemctl", &["enable", "nginx.service"])
+                {
+                    Ok(output) if output.status.success() => (
+                        true,
+                        "Autostart Nginx diaktifkan secara persisten tanpa restart layanan.",
                     ),
+                    _ => (
+                        false,
+                        "Autostart Nginx gagal diaktifkan. Periksa unit dan log systemd.",
+                    ),
+                },
+                NginxBootStatus::Masked | NginxBootStatus::Unknown => (
+                    false,
+                    "Status autostart Nginx memerlukan tinjauan operator; mask dan layanan tidak diubah.",
                 ),
-                Err(e) => (false, format!("Gagal menginisialisasi tabel nftables: {e}")),
             };
             results.push(DoctorRemediationResultDto {
-                item_id: "nftables_loopback_guard".to_string(),
+                item_id: "nginx_boot_enabled".into(),
                 success,
-                message: msg,
+                message: message.into(),
+            });
+        }
+
+        // Only the API's typed NftablesSync carries authoritative tenant bindings.
+        // A generic doctor request must never replace these with an empty set.
+        if targets.iter().any(|c| c == "nftables_loopback_guard") {
+            results.push(DoctorRemediationResultDto {
+                item_id: "nftables_loopback_guard".to_string(),
+                success: false,
+                message: "Sinkronkan nftables melalui API hardening dengan pemetaan port tenant. Aturan tidak diubah oleh doctor agent.".to_string(),
             });
         }
 
@@ -1004,6 +1078,154 @@ mod tests {
             .find(|c| c.id == "agent_ipc_socket")
             .unwrap();
         assert_eq!(sock_check.status, "fail");
+    }
+
+    #[test]
+    fn doctor_distinguishes_running_nginx_from_persistent_boot_enablement() {
+        for (state, exit, enable_exit, expected_status, fixable, success) in [
+            ("enabled", 0, 0, DoctorCheckStatus::Pass, false, true),
+            ("disabled", 1, 0, DoctorCheckStatus::Warn, true, true),
+            ("enabled-runtime", 0, 0, DoctorCheckStatus::Warn, true, true),
+            ("disabled", 1, 1, DoctorCheckStatus::Warn, true, false),
+            ("masked", 1, 0, DoctorCheckStatus::Warn, false, false),
+            (
+                "masked-runtime",
+                1,
+                0,
+                DoctorCheckStatus::Warn,
+                false,
+                false,
+            ),
+            ("unexpected", 1, 0, DoctorCheckStatus::Warn, false, false),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let runner = Arc::new(MockSystemRunner::new());
+            runner.set_response(
+                "systemctl is-enabled nginx.service",
+                exit,
+                state.as_bytes(),
+                b"",
+            );
+            runner.set_response("systemctl enable nginx.service", enable_exit, b"", b"");
+            let nft = Arc::new(NftablesManager::with_path(
+                runner.clone(),
+                temp.path().join("rules.nft"),
+            ));
+            let manager = ReliabilityManager::new(runner.clone(), temp.path(), nft);
+            let checks = manager.check_services_and_runtime();
+            assert_eq!(
+                checks
+                    .iter()
+                    .find(|check| check.id == "service_nginx")
+                    .expect("running")
+                    .status,
+                DoctorCheckStatus::Pass
+            );
+            let boot = checks
+                .iter()
+                .find(|check| check.id == "nginx_boot_enabled")
+                .expect("boot check");
+            assert_eq!(boot.status, expected_status);
+            assert_eq!(boot.fixable, fixable);
+            let result = manager
+                .fix_doctor(&SystemDoctorFixRequest {
+                    target_checks: vec!["nginx_boot_enabled".into()],
+                })
+                .expect("boot fix");
+            assert_eq!(result.all_fixed, success);
+            let commands = runner.get_commands();
+            assert_eq!(
+                commands
+                    .iter()
+                    .any(|command| command == "systemctl enable nginx.service"),
+                fixable
+            );
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command.starts_with("systemctl restart")
+                        || command.starts_with("systemctl start ")
+                        || command.starts_with("systemctl unmask"))
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_nginx_fix_never_restarts_and_validates_before_starting() {
+        for (active, syntax, start, success) in [
+            (0, 0, 0, true),
+            (3, 0, 0, true),
+            (3, 1, 0, false),
+            (3, 0, 1, false),
+        ] {
+            let temp = tempdir().expect("tempdir");
+            let runner = Arc::new(MockSystemRunner::new());
+            runner.set_response("systemctl is-active nginx", active, b"", b"");
+            runner.set_response("nginx -t -c /etc/nginx/nginx.conf", syntax, b"", b"");
+            runner.set_response("systemctl start nginx", start, b"", b"");
+            let nft = Arc::new(NftablesManager::with_path(
+                runner.clone(),
+                temp.path().join("rules.nft"),
+            ));
+            let manager = ReliabilityManager::new(runner.clone(), temp.path(), nft);
+            let result = manager
+                .fix_doctor(&SystemDoctorFixRequest {
+                    target_checks: vec!["service_nginx".into()],
+                })
+                .expect("fix");
+            assert_eq!(result.all_fixed, success);
+            let commands = runner.get_commands();
+            assert!(!commands.iter().any(|command| command.contains("restart")
+                || command.contains("reload")
+                || command.contains("stop")));
+            let expected = if active == 0 {
+                vec!["systemctl is-active nginx"]
+            } else if syntax != 0 {
+                vec![
+                    "systemctl is-active nginx",
+                    "nginx -t -c /etc/nginx/nginx.conf",
+                ]
+            } else {
+                vec![
+                    "systemctl is-active nginx",
+                    "nginx -t -c /etc/nginx/nginx.conf",
+                    "systemctl start nginx",
+                ]
+            };
+            assert_eq!(commands, expected);
+        }
+    }
+
+    #[test]
+    fn generic_doctor_fix_preserves_healthy_nginx_and_existing_firewall_bindings() {
+        let temp = tempdir().expect("tempdir");
+        let runner = Arc::new(MockSystemRunner::new());
+        let path = temp.path().join("rules.nft");
+        let rules = b"fixture existing tenant 10001 port 20001";
+        runner.set_file_content(&path, rules);
+        let nft = Arc::new(NftablesManager::with_path(runner.clone(), &path));
+        let manager = ReliabilityManager::new(runner.clone(), temp.path(), nft);
+        manager
+            .fix_doctor(&SystemDoctorFixRequest::default())
+            .expect("generic fix");
+        assert!(!runner.get_commands().iter().any(
+            |command| command.starts_with("systemctl restart")
+                || command.starts_with("systemctl start")
+                || command.starts_with("nft ")
+        ));
+        let result = manager
+            .fix_doctor(&SystemDoctorFixRequest {
+                target_checks: vec!["nftables_loopback_guard".into()],
+            })
+            .expect("firewall fix");
+        assert!(!result.all_fixed);
+        assert_eq!(runner.read_file(&path).expect("rules"), rules.to_vec());
+        assert!(
+            !runner
+                .get_commands()
+                .iter()
+                .any(|command| command.starts_with("nft "))
+        );
     }
 
     #[test]

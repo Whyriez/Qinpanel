@@ -1,6 +1,6 @@
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
-import { ConfigureDialog, ManagedKeyDialog, ManagedStorage } from './ManagedStorage';
+import { ConfigureDialog, ManagedKeyDialog, ManagedStorage, StorageDnsStatus } from './ManagedStorage';
 import type { StorageConnection } from '../../api/storage';
 import { canCancelJob } from '../../lib/jobProgress';
 import type { JobItem } from '../../types/api';
@@ -16,7 +16,35 @@ describe('Managed storage', () => {
     expect(html).toContain('Generate otomatis'); expect(html).toContain('Generate &amp; aktifkan');
     expect(html).toContain('DNS-01 Cloudflare'); expect(html).toContain('perpanjangan otomatis');
     expect(html).toContain('Gunakan sertifikat sendiri'); expect(html).not.toContain('<textarea');
-    expect(html).toContain('settings?section=network'); expect(html).toContain('type="email"');
+    expect(html).toContain('Memeriksa token DNS-01'); expect(html).toContain('type="email"');
+    expect(html).not.toContain('Hubungkan token DNS-01 (tab baru)');
+  });
+  it('explains why a connected Tunnel does not make DNS-01 ready and links to the certificate tab', () => {
+    const html = renderToString(<StorageDnsStatus english={false} dns={{ available: true, configured: false, zone_name: null }} checking={false} failed={false} />);
+    expect(html).toContain('Tunnel dan token DNS-01 dihubungkan secara terpisah');
+    expect(html).toContain('Zone DNS Edit dan Zone Read');
+    expect(html).toContain('network_tab=certificates');
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('isian domain dan email tetap ada');
+  });
+  it('does not label a loading or unavailable credential status as disconnected', () => {
+    for (const props of [
+      { checking: true, failed: false },
+      { checking: false, failed: true },
+      { checking: false, failed: false, dns: { available: false, configured: false, zone_name: null } },
+    ]) {
+      const html = renderToString(<StorageDnsStatus english={false} {...props} />);
+      expect(html).not.toContain('Hubungkan token DNS-01 (tab baru)');
+      expect(html).toContain('role="status"');
+    }
+  });
+  it('shows the connected DNS-01 zone with legacy and current API responses', () => {
+    for (const dns of [{ configured: true, zone_name: 'example.test' }, { available: true, configured: true, zone_name: 'example.test' }]) {
+      const html = renderToString(<StorageDnsStatus english dns={dns} checking={false} failed={false} />);
+      expect(html).toContain('DNS-01 token connected for zone:');
+      expect(html).toContain('example.test');
+      expect(html).not.toContain('Connect DNS-01 token (new tab)');
+    }
   });
   it('distinguishes local service activation from connecting an external provider', () => {
     const html = renderToString(<ManagedStorage english={false} context={{ owners: [], sites: [], upload_limit_bytes: 33554432 }} onCreated={vi.fn()} />);

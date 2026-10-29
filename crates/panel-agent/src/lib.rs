@@ -1161,8 +1161,9 @@ impl AgentServer {
                     }
                 }
                 RequestPayload::Cloudflare(operation) => {
-                    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-                    let _guard = LOCK.lock().await;
+                    // Status reads atomic local files and service state only. Do not
+                    // queue it behind remote API calls or connector mutations.
+                    let _guard = cloudflare::operation_guard(&operation).await;
                     let runner = Arc::clone(&self.runner);
                     match tokio::task::spawn_blocking(move || {
                         cloudflare::execute(runner.as_ref(), operation)

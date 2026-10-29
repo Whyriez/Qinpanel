@@ -18,6 +18,33 @@ fn keys() -> S3Credentials {
 }
 
 #[tokio::test]
+async fn storage_tls_inventory_distinguishes_dns_agent_failure_from_missing_token() {
+    let ctx = Context::new().await;
+    for (configured, failed) in [(false, false), (true, false), (true, true)] {
+        ctx.runtime
+            .dns_configured
+            .store(configured, Ordering::SeqCst);
+        ctx.runtime.dns_fail.store(failed, Ordering::SeqCst);
+        let (status, body) = ctx
+            .call(
+                "GET",
+                "/api/v1/storage/managed/tls",
+                Some("admin"),
+                false,
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["dns"]["available"], !failed);
+        assert_eq!(body["dns"]["configured"], configured && !failed);
+        assert_eq!(body["certificate"]["state"], "idle");
+        assert!(!body.to_string().contains("fixture-dns-revision"));
+        assert!(!body.to_string().contains("api_token"));
+    }
+    assert_eq!(ctx.runtime.configure_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn storage_tls_generation_is_admin_csrf_scoped_and_requires_dns_consent() {
     let ctx = Context::new().await;
     let request = json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":1,"hostname":"storage.example.test","email":"admin@example.test","confirmed":true});
@@ -190,11 +217,15 @@ struct Fake {
     session: AtomicBool,
     managed_fail: AtomicBool,
     dns_configured: AtomicBool,
+    dns_fail: AtomicBool,
     configure_calls: AtomicUsize,
 }
 impl StorageRuntime for Fake {
     fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
         Box::pin(async move {
+            if self.dns_fail.load(Ordering::SeqCst) {
+                return Err(Failure::Timeout);
+            }
             Ok(
                 json!({"configured":self.dns_configured.load(Ordering::SeqCst),"zone_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","zone_name":"example.test","revision":"fixture-dns-revision","pending":[]}),
             )

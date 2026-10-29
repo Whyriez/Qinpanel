@@ -50,6 +50,10 @@ ROOTS = (
 QUEUE_ROOTS = tuple("var/spool/postfix/" + name for name in (
     "active", "bounce", "corrupt", "defer", "deferred", "flush", "hold",
     "incoming", "maildrop", "saved", "trace"))
+# Nginx packages can ship this alias before any dynamic module is installed.
+# Preserve that dangling symlink; do not follow it or allow arbitrary OS links.
+NGINX_MODULE_ALIAS = "usr/share/nginx/modules"
+NGINX_MODULE_TARGETS = {"usr/lib/nginx/modules", "usr/lib64/nginx/modules"}
 SYSTEM_USERS = {"root", "panel-api", "www-data", "mysql", "postgres", "redis",
                 "postfix", "postdrop", "dovecot", "dovenull", "opendkim", "nobody", "nginx", "apache", "valkey"}
 UNIT_PATTERN = re.compile(r"(?:site-[A-Za-z0-9][A-Za-z0-9_.-]{0,100}\.(?:service|timer)|(?:panel-fpm@[A-Za-z0-9_.-]{1,100}|panel-u[1-5][0-9]{4}|tenant-[1-9][0-9]*)\.(?:service|slice))$")
@@ -537,7 +541,9 @@ class Engine:
                     else:
                         import posixpath
                         resolved = posixpath.normpath(target.lstrip("/") if target.startswith("/") else str(PurePosixPath(name).parent / target))
-                    if not allowed_path(resolved, manifest["roots"]):
+                    module_alias = (member.issym() and name == NGINX_MODULE_ALIAS
+                                    and resolved in NGINX_MODULE_TARGETS)
+                    if not allowed_path(resolved, manifest["roots"]) and not module_alias:
                         raise ValueError("Symlink/hardlink keluar dari cakupan backup: " + name)
                     links[name] = (resolved, member.issym())
                 members.append(name)

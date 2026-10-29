@@ -23,14 +23,15 @@ function Pager({ page, total, onPage, disabled }: { page: number; total: number;
   return <div className="flex items-center justify-end gap-3 text-sm"><button className={buttonStyle} disabled={disabled || page <= 1} onClick={() => onPage(page - 1)}>Sebelumnya</button><span>Halaman {page} dari {Math.max(1, total)}</span><button className={buttonStyle} disabled={disabled || page >= total} onClick={() => onPage(page + 1)}>Berikutnya</button></div>;
 }
 
-export function NetworkSettings() {
-  const [tab, setTab] = useState<'public' | 'dns' | 'tunnels' | 'certificates'>('public');
+export function NetworkSettings({ initialTab = 'public' }: { initialTab?: 'public' | 'dns' | 'tunnels' | 'certificates' } = {}) {
+  const [tab, setTab] = useState(initialTab);
   const [network, setNetwork] = useState<NetworkOverview | null>(null);
   const [status, setStatus] = useState<CloudflareStatus | null>(null);
   const [ipv4, setIpv4] = useState(''); const [ipv6, setIpv6] = useState('');
   const [account, setAccount] = useState(''); const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false); const submitting = useRef(false);
   const [error, setError] = useState(''); const [message, setMessage] = useState('');
+  const [statusError, setStatusError] = useState(''); const [statusLoading, setStatusLoading] = useState(true);
   const [zones, setZones] = useState<CloudflarePage<Zone> | null>(null);
   const [zoneId, setZoneId] = useState(''); const [newZone, setNewZone] = useState('');
   const [records, setRecords] = useState<CloudflarePage<DnsRecord> | null>(null);
@@ -44,7 +45,8 @@ export function NetworkSettings() {
   const mounted = useRef(true);
   const zoneRequest = useRef(0); const recordRequest = useRef(0); const tunnelRequest = useRef(0);
   const statusRequest = useRef(0);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const statusFlight = useRef<Promise<boolean> | null>(null); const statusAbort = useRef<AbortController | null>(null);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; statusAbort.current?.abort(); }; }, []);
 
   const loadZones = useCallback(async (page = 1) => {
     const seq = ++zoneRequest.current;
@@ -63,18 +65,26 @@ export function NetworkSettings() {
     const value = await cloudflareCommand<CloudflarePage<Tunnel>>({ action: 'tunnels', page });
     if (mounted.current && seq === tunnelRequest.current) setTunnels(value);
   }, []);
-  const refreshStatus = useCallback(async () => {
+  const refreshStatus = useCallback(() => {
+    if (statusFlight.current && !statusAbort.current?.signal.aborted) return statusFlight.current;
     const seq = ++statusRequest.current;
-    try {
-      const current = await fetchCloudflareStatus();
-      if (mounted.current && seq === statusRequest.current) setStatus(current);
-      return true;
-    } catch (cause) { if (mounted.current) setError(errorText(cause)); return false; }
+    const controller = new AbortController(); statusAbort.current = controller;
+    setStatusLoading(true);
+    const pending = (async () => {
+      try {
+        const current = await fetchCloudflareStatus(controller.signal);
+        if (mounted.current && seq === statusRequest.current) { setStatus(current); setStatusError(''); setAccount(value => value || current.account_id || ''); }
+        return true;
+      } catch (cause) { if (mounted.current && seq === statusRequest.current) setStatusError(errorText(cause)); return false; }
+      finally { if (seq === statusRequest.current) { statusFlight.current = null; if (mounted.current) setStatusLoading(false); } }
+    })();
+    statusFlight.current = pending;
+    return pending;
   }, []);
   const finished = useCallback(async (job: JobItem) => {
     const okay = await refreshStatus();
     // Lists may require separate token permissions; failure must be visible.
-    try { await loadTunnels(); } catch (cause) { if (mounted.current) setError(errorText(cause)); }
+    try { if (okay) await loadTunnels(); } catch (cause) { if (mounted.current) setError(errorText(cause)); }
     if (mounted.current) {
       if (job.status === 'succeeded') setMessage(okay ? 'Operasi Cloudflare selesai. Status server telah diperbarui.' : 'Tugas selesai. Menunggu verifikasi status server.');
       else { setMessage(''); if (job.status === 'failed') setError(job.error_message || 'Operasi Cloudflare gagal. Lihat rincian pada halaman Tugas.'); }
@@ -91,7 +101,7 @@ export function NetworkSettings() {
       if (checking) return;
       checking = true;
       void (async () => {
-        try { await refreshStatus(); if (active) await loadTunnels(); }
+        try { const okay = await refreshStatus(); if (active && okay) await loadTunnels(); }
         catch (cause) { if (active && mounted.current) setError(errorText(cause)); }
         finally { checking = false; }
       })();
@@ -101,15 +111,12 @@ export function NetworkSettings() {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([fetchNetwork(), fetchCloudflareStatus()]).then(([net, cf]) => {
-      if (!active) return;
-      if (net.status === 'fulfilled') { setNetwork(net.value); setIpv4(net.value.ipv4 || ''); setIpv6(net.value.ipv6 || ''); }
-      else setError(errorText(net.reason));
-      if (cf.status === 'fulfilled') { setStatus(cf.value); setAccount(cf.value.account_id || ''); }
-      else setError(errorText(cf.reason));
-    });
+    void fetchNetwork().then(net => {
+      if (active) { setNetwork(net); setIpv4(net.ipv4 || ''); setIpv6(net.ipv6 || ''); }
+    }).catch(cause => { if (active) setError(errorText(cause)); });
+    void refreshStatus();
     return () => { active = false; };
-  }, []);
+  }, [refreshStatus]);
   useEffect(() => {
     if (!status?.configured || tab === 'public' || tab === 'certificates') return;
     void loadZones().catch(cause => { if (mounted.current) setError(errorText(cause)); });
@@ -139,7 +146,8 @@ export function NetworkSettings() {
     <nav aria-label="Pengaturan koneksi domain" className="settings-section-tabs settings-network-tabs flex flex-wrap gap-2 border-b border-[var(--line)] pb-3">
       {([['public', 'IP publik'], ['dns', 'Cloudflare DNS'], ['tunnels', 'Cloudflare Tunnel'], ['certificates', 'Sertifikat DNS-01']] as const).map(([key, label]) => <button key={key} className={tab === key ? primaryStyle : buttonStyle} aria-pressed={tab === key} onClick={() => { setTab(key); setError(''); setMessage(''); }}>{label}</button>)}
     </nav>
-    {(error || runtime.error) && <div role="alert" className="border-l-2 border-[var(--danger)] pl-3 text-sm text-[var(--danger)]">{error || runtime.error}<button className={`${buttonStyle} ml-3`} disabled={busy} onClick={() => { void refreshStatus(); }}>Muat ulang status</button></div>}
+    {(error || statusError || runtime.error) && <div role="alert" className="border-l-2 border-[var(--danger)] pl-3 text-sm text-[var(--danger)]">{error || statusError || runtime.error}<button className={`${buttonStyle} ml-3`} disabled={busy || statusLoading} onClick={() => { void refreshStatus(); }}>{statusLoading ? 'Memuat status…' : 'Muat ulang status'}</button></div>}
+    {statusLoading && <p role="status" className="text-sm text-[var(--ink-muted)]">Memuat status Cloudflare…</p>}
     {message && <p role="status" className="text-sm text-[var(--ink-muted)]">{message}</p>}
     {runtime.jobs.map(job => <div key={job.id} className="space-y-2 border border-[var(--line)] rounded-[var(--radius-md)] p-4"><p className="text-sm font-medium">{job.name === 'cloudflare.install' ? 'Pemasangan cloudflared' : 'Perubahan tunnel'} · {job.status === 'queued' ? 'Dalam antrean' : job.status === 'succeeded' ? 'Memverifikasi status' : 'Sedang berjalan'}</p><RuntimeJobProgress job={job} runtime="Cloudflare" /></div>)}
     {busy && <p role="status" className="flex items-center gap-2 text-sm"><RefreshCw className="h-4 w-4 animate-spin" />Memproses permintaan…</p>}
@@ -195,7 +203,7 @@ export function NetworkSettings() {
 
         {tab === 'tunnels' && <section className="space-y-5 border-t border-[var(--line)] pt-5" aria-label="Pengelolaan tunnel">
           <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold">Konektor server · {status.connector_installed ? 'Terpasang' : 'Belum terpasang'}</h3><p className="mt-1 text-sm text-[var(--ink-muted)]">Konektor berjalan sebagai layanan server. Status lokal dan kesehatan koneksi Cloudflare diperiksa secara terpisah.</p></div>{!status.connector_installed && <button className={primaryStyle} disabled={disabled} onClick={() => { void run(async () => { runtime.track(await installCloudflare()); }); }}>Pasang cloudflared</button>}</div>
-          <form className="flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); void queue({ action:'create_tunnel',name:tunnelName.trim() }); }}><div className="w-full min-w-0 sm:w-auto sm:flex-1"><Field label="Nama tunnel baru"><input required pattern="[a-zA-Z0-9_-]{1,80}" className={inputStyle} value={tunnelName} onChange={e => setTunnelName(e.target.value)} placeholder="project-server" /></Field></div><button className={buttonStyle} disabled={disabled}>Buat tunnel</button><button type="button" className={buttonStyle} disabled={disabled} onClick={() => query(async () => { await refreshStatus(); await loadTunnels(tunnels?.pagination.page || 1); })}>Muat ulang tunnel</button></form>
+          <form className="flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); void queue({ action:'create_tunnel',name:tunnelName.trim() }); }}><div className="w-full min-w-0 sm:w-auto sm:flex-1"><Field label="Nama tunnel baru"><input required pattern="[a-zA-Z0-9_-]{1,80}" className={inputStyle} value={tunnelName} onChange={e => setTunnelName(e.target.value)} placeholder="project-server" /></Field></div><button className={buttonStyle} disabled={disabled}>Buat tunnel</button><button type="button" className={buttonStyle} disabled={disabled} onClick={() => query(async () => { if (await refreshStatus()) await loadTunnels(tunnels?.pagination.page || 1); })}>Muat ulang tunnel</button></form>
           {!tunnels ? <p role="status">Daftar tunnel belum dimuat.</p> : <>
             <div className="divide-y divide-[var(--line)]">{tunnels.items.map(tunnel => { const local = status.managed_tunnels.find(t => t.id === tunnel.id); return <article key={tunnel.id} className="space-y-3 py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h4 className="font-medium break-all">{tunnel.name}</h4><p className="mt-1 text-sm text-[var(--ink-muted)]">Cloudflare: {tunnel.status || 'Belum diketahui'} · Lokal: {local?.local_status || 'Belum terhubung ke panel'}</p></div><div className="flex flex-wrap gap-2">{!tunnel.managed ? <button className={buttonStyle} disabled={disabled || !tunnel.remote_config} onClick={() => { void queue({action:'tunnel_action',tunnel_id:tunnel.id,operation:'import'}); }}>Hubungkan ke panel<span className="sr-only"> {tunnel.name}</span></button> : <><button className={buttonStyle} disabled={disabled || !status.connector_installed || local?.local_status === 'active'} onClick={() => { void queue({action:'tunnel_action',tunnel_id:tunnel.id,operation:'start'}); }}>Mulai<span className="sr-only"> {tunnel.name}</span></button><button className={buttonStyle} disabled={disabled || local?.local_status !== 'active'} onClick={() => { void queue({action:'tunnel_action',tunnel_id:tunnel.id,operation:'stop'}); }}>Hentikan<span className="sr-only"> {tunnel.name}</span></button><button className={buttonStyle} disabled={disabled || !!local?.routes.length} onClick={() => { setRemoveTunnel(tunnel); setConfirmName(''); }}>Hapus tunnel<span className="sr-only"> {tunnel.name}</span></button></>}</div></div>{local?.routes.map(route => <div key={route.hostname} className="flex flex-wrap justify-between items-center gap-3 text-sm"><a className="text-[var(--primary)] underline break-all" href={`https://${route.hostname}`} target="_blank" rel="noreferrer">{route.hostname}</a><button className={buttonStyle} disabled={disabled} onClick={() => { void queue({action:'unpublish',tunnel_id:tunnel.id,zone_id:route.zone_id,hostname:route.hostname}); }}>Lepaskan hostname<span className="sr-only"> {route.hostname}</span></button></div>)}</article>; })}</div>
             {tunnels.items.length === 0 && <p className="text-sm">Belum ada tunnel pada akun ini.</p>}

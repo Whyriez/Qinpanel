@@ -43,16 +43,20 @@ export function ConfigureDialog({ english, status, onClose, onSaved }: Localized
   const [chain, setChain] = useState(''); const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const [inventory, setInventory] = useState<StorageTlsInventory | null>(null); const [reload, setReload] = useState(0);
+  const [checking, setChecking] = useState(true); const [statusError, setStatusError] = useState('');
+  const statusFailed = !!statusError;
   const requestId = useRef<string | null>(null); const saved = useRef(onSaved); saved.current = onSaved;
   const observedPending = useRef(false);
   const pending = !!inventory && ['queued', 'issuing', 'configuring'].includes(inventory.certificate.state);
   useEffect(() => {
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
+      setChecking(true);
       try {
         const value = await fetchStorageTls(controller.signal);
         if (controller.signal.aborted) return;
         setInventory(value);
+        setStatusError('');
         setHost(current => current || value.certificate.hostname || '');
         setEmail(current => current || value.certificate.email || '');
         if (['queued', 'issuing', 'configuring'].includes(value.certificate.state)) observedPending.current = true;
@@ -60,16 +64,22 @@ export function ConfigureDialog({ english, status, onClose, onSaved }: Localized
           const service = await fetchManagedStorage(controller.signal);
           if (!controller.signal.aborted && service.configured && service.running) saved.current(service);
         } else if (['queued', 'issuing', 'configuring'].includes(value.certificate.state)) timer = setTimeout(() => { void load(); }, 3000);
-      } catch (error) { if (!controller.signal.aborted) setError(errorMessage(error)); }
+      } catch (error) { if (!controller.signal.aborted) setStatusError(errorMessage(error)); }
+      finally { if (!controller.signal.aborted) setChecking(false); }
     };
     void load();
     return () => { controller.abort(); clearTimeout(timer); };
   }, [reload]);
+  useEffect(() => {
+    const refresh = () => { if (!busy && !pending) setReload(value => value + 1); };
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, [busy, pending]);
   const save = async (event: FormEvent) => {
     event.preventDefault(); if (busy || pending) return; setBusy(true); setError('');
     try {
       if (method === 'auto') {
-        if (!inventory || !confirmed) return;
+        if (!inventory || checking || statusFailed || inventory.dns.available === false || !inventory.dns.configured || !confirmed) return;
         if (inventory.certificate.state === 'failed' && inventory.certificate.request_id === requestId.current) requestId.current = null;
         requestId.current ??= storageAllocationId();
         const certificate = await generateStorageTls({ request_id: requestId.current, expected_revision: inventory.certificate.revision, hostname: host.trim(), email: email.trim(), confirmed });
@@ -84,9 +94,9 @@ export function ConfigureDialog({ english, status, onClose, onSaved }: Localized
   };
   const resetRequest = () => { requestId.current = null; setConfirmed(false); };
   const automatic = method === 'auto';
-  return <Dialog english={english} title={t('Aktifkan storage Qinpanel', 'Activate Qinpanel storage')} description={t('Layanan S3 tersendiri di server ini, dengan endpoint HTTPS untuk aplikasi Anda.', 'A separate S3 service on this server, with an HTTPS endpoint for your applications.')} busy={busy} error={error} onClose={onClose} footer={<>
+  return <Dialog english={english} title={t('Aktifkan storage Qinpanel', 'Activate Qinpanel storage')} description={t('Layanan S3 tersendiri di server ini, dengan endpoint HTTPS untuk aplikasi Anda.', 'A separate S3 service on this server, with an HTTPS endpoint for your applications.')} busy={busy} error={error || statusError} onClose={onClose} footer={<>
     <button type="button" disabled={busy} onClick={onClose}>{pending ? t('Tutup', 'Close') : t('Batal', 'Cancel')}</button>
-    <button form={formId} type="submit" className="button-primary" disabled={busy || pending || automatic && (!inventory?.dns.configured || !confirmed)}>{busy ? t('Memproses…', 'Processing…') : pending ? t('Penerbitan berjalan…', 'Issuance in progress…') : automatic ? t('Generate & aktifkan', 'Generate & activate') : status?.configured ? t('Perbarui sertifikat', 'Update certificate') : t('Aktifkan layanan', 'Activate service')}</button>
+    <button form={formId} type="submit" className="button-primary" disabled={busy || pending || automatic && (checking || statusFailed || inventory?.dns.available === false || !inventory?.dns.configured || !confirmed)}>{busy ? t('Memproses…', 'Processing…') : pending ? t('Penerbitan berjalan…', 'Issuance in progress…') : automatic ? t('Generate & aktifkan', 'Generate & activate') : status?.configured ? t('Perbarui sertifikat', 'Update certificate') : t('Aktifkan layanan', 'Activate service')}</button>
   </>}>
     <form id={formId} onSubmit={save} className="storage-form-section" aria-busy={busy}>
       <p className="storage-note">{t('Gunakan domain terpisah dari panel dan website. Domain dapat dihubungkan ke IP publik server atau melalui Cloudflare Tunnel.', 'Use a domain separate from the panel and websites. Connect it to the server public IP or through Cloudflare Tunnel.')}</p>
@@ -97,13 +107,14 @@ export function ConfigureDialog({ english, status, onClose, onSaved }: Localized
       </select></label>
       {automatic ? <>
         <p className="storage-note">{t('Validasi DNS-01 Cloudflare bekerja untuk IP publik maupun Tunnel, tanpa membuka port 80. Private key dibuat dan dipasang oleh panel; tidak perlu disalin.', 'Cloudflare DNS-01 works with public IPs and Tunnels without opening port 80. The panel generates and installs the private key; no copying is required.')}</p>
-        {inventory?.dns.configured ? <p className="storage-note">{t('Zona DNS terhubung:', 'Connected DNS zone:')} {inventory.dns.zone_name}</p> : <p className="storage-notice">{t('Hubungkan token DNS-01 Cloudflare terlebih dahulu di', 'Connect a Cloudflare DNS-01 token first in')} <a href="/settings?section=network">{t('Pengaturan server → DNS dan Cloudflare', 'Server settings → DNS and Cloudflare')}</a>.</p>}
+        <StorageDnsStatus english={english} dns={inventory?.dns} checking={checking} failed={statusFailed} />
         <label>{t('Email sertifikat', 'Certificate email')}<input type="email" required maxLength={254} autoComplete="email" value={email} disabled={busy || pending} onChange={event => { setEmail(event.target.value); resetRequest(); }} /></label>
         <label className="storage-tls-consent"><input type="checkbox" required checked={confirmed} disabled={busy || pending} onChange={event => setConfirmed(event.target.checked)} /><span>{t("Saya menyetujui ketentuan Let's Encrypt, penerbitan sertifikat untuk domain ini, dan perpanjangan otomatis menggunakan token DNS yang terhubung.", "I agree to the Let's Encrypt terms, certificate issuance for this domain, and automatic renewal using the connected DNS token.")} <a href="https://letsencrypt.org/repository/" target="_blank" rel="noreferrer">{t('Baca ketentuan', 'Read terms')}</a></span></label>
+        {!confirmed && <p className="storage-note">{t('Generate & aktifkan tersedia setelah token DNS-01 terhubung dan persetujuan dicentang. Domain serta email sertifikat wajib diisi.', 'Generate & activate is available after the DNS-01 token is connected and consent is checked. The storage domain and certificate email are required.')}</p>}
         {inventory?.certificate.not_after && <p className="storage-note">{t('Sertifikat aktif berakhir:', 'Active certificate expires:')} {new Date(inventory.certificate.not_after * 1000).toLocaleDateString()}</p>}
         {inventory?.certificate.error && <p role="alert" className="storage-error">{inventory.certificate.error}</p>}
         {pending && <p role="status" className="storage-notice">{t('Penerbitan dan aktivasi berjalan di latar belakang. Anda boleh menutup dialog; status tersimpan dan perpanjangan dijadwalkan otomatis.', 'Issuance and activation run in the background. You can close this dialog; status is persisted and renewal is scheduled automatically.')}</p>}
-        <button type="button" disabled={busy} onClick={() => { setError(''); setReload(value => value + 1); }}>{t('Muat ulang status sertifikat', 'Refresh certificate status')}</button>
+        <button type="button" disabled={busy || checking} onClick={() => { setError(''); setReload(value => value + 1); }}>{t('Muat ulang token DNS-01 dan sertifikat', 'Refresh DNS-01 token and certificate')}</button>
       </> : <>
         <label>{t('Sertifikat lengkap (PEM)', 'Full certificate chain (PEM)')}<textarea required rows={4} maxLength={65536} value={chain} spellCheck={false} autoComplete="off" disabled={busy || pending} onChange={event => setChain(event.target.value)} placeholder="-----BEGIN CERTIFICATE-----" /></label>
         <label>{t('Private key (PEM)', 'Private key (PEM)')}<textarea required rows={4} maxLength={65536} value={key} spellCheck={false} autoComplete="off" disabled={busy || pending} onChange={event => setKey(event.target.value)} placeholder="-----BEGIN PRIVATE KEY-----" /></label>
@@ -111,6 +122,18 @@ export function ConfigureDialog({ english, status, onClose, onSaved }: Localized
       </>}
     </form>
   </Dialog>;
+}
+
+export function StorageDnsStatus({ english, dns, checking, failed }: Localized & { dns?: StorageTlsInventory['dns']; checking: boolean; failed: boolean }) {
+  const t = language(english);
+  if (checking) return <p role="status" className="storage-note">{t('Memeriksa token DNS-01 Cloudflare…', 'Checking the Cloudflare DNS-01 token…')}</p>;
+  if (failed || !dns || dns.available === false) return <p role="status" className="storage-notice">{t('Status token DNS-01 belum dapat diperiksa. Muat ulang status atau periksa koneksi panel-agent; token yang tersimpan belum tentu terputus.', 'The DNS-01 token status could not be checked. Refresh the status or check the panel-agent connection; the saved token may still be connected.')}</p>;
+  if (dns.configured) return <p className="storage-note">{t('Token DNS-01 terhubung untuk zona:', 'DNS-01 token connected for zone:')} {dns.zone_name}</p>;
+  return <div className="storage-notice"><p>{t('Cloudflare Tunnel dan token DNS-01 dihubungkan secara terpisah. Tunnel menyediakan jalur akses; penerbitan sertifikat ini memerlukan token untuk membuat record TXT validasi domain.', 'Cloudflare Tunnel and the DNS-01 token are connected separately. Tunnel provides the access route; this certificate requires a token to create domain-validation TXT records.')}</p>
+    <p>{t('Buka Sertifikat DNS-01 → Hubungkan token DNS-01. Gunakan token khusus dengan izin Zone DNS Edit dan Zone Read untuk zona domain storage.', 'Open DNS-01 certificates → Connect DNS-01 token. Use a dedicated token with Zone DNS Edit and Zone Read permissions for the storage domain zone.')}</p>
+    <a href="/settings?section=network&network_tab=certificates" target="_blank" rel="noopener noreferrer">{t('Hubungkan token DNS-01 (tab baru)', 'Connect DNS-01 token (new tab)')}</a>
+    <p>{t('Setelah tersimpan, kembali ke dialog ini. Status diperiksa ulang saat Anda kembali; isian domain dan email tetap ada.', 'After saving, return to this dialog. The status is refreshed when you return; your domain and email remain filled in.')}</p>
+  </div>;
 }
 
 function BucketDialog({ english, context, ownerId, siteId, onClose, onSaved }: Localized & { context: StorageContext; ownerId?: number; siteId?: number; onClose: () => void; onSaved: (connection: StorageConnection) => void }) {

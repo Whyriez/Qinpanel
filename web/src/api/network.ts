@@ -23,7 +23,25 @@ export type CloudflareCommand =
 
 export const fetchNetwork = () => request<NetworkOverview>('/api/v1/network');
 export const savePublicAddresses = (ipv4: string, ipv6: string) => request('/api/v1/network', { method: 'PUT', body: JSON.stringify({ ipv4, ipv6 }) });
-export const fetchCloudflareStatus = () => request<CloudflareStatus>('/api/v1/network/cloudflare');
+export async function fetchCloudflareStatus(signal?: AbortSignal): Promise<CloudflareStatus> {
+  let value: CloudflareStatus;
+  try {
+    value = await request<CloudflareStatus>('/api/v1/network/cloudflare', { signal });
+  } catch (error) {
+    const status = (error as { status?: number } | null)?.status;
+    if (status === 502 || status === 504 || error instanceof TypeError) {
+      throw new Error('Status Cloudflare belum dapat diperbarui karena koneksi panel terputus. Muat ulang status setelah layanan kembali tersedia; tidak perlu memasang ulang Tunnel.');
+    }
+    throw error;
+  }
+  if (!value || typeof value.configured !== 'boolean' || typeof value.connector_installed !== 'boolean'
+    || !(value.account_id === null || typeof value.account_id === 'string') || !Array.isArray(value.managed_tunnels)
+    || value.managed_tunnels.some(tunnel => !tunnel || typeof tunnel.id !== 'string' || typeof tunnel.local_status !== 'string'
+      || !Array.isArray(tunnel.routes) || tunnel.routes.some(route => !route || typeof route.hostname !== 'string' || typeof route.zone_id !== 'string'))) {
+    throw new Error('Respons status Cloudflare tidak valid. Muat ulang status atau perbarui paket Qinpanel lengkap.');
+  }
+  return value;
+}
 export const cloudflareCommand = <T,>(command: CloudflareCommand) => request<T>('/api/v1/network/cloudflare', { method: 'POST', body: JSON.stringify(command) });
 export const installCloudflare = () => request<JobItem>('/api/v1/network/cloudflare/install', { method: 'POST' });
 export const checkProjectDns = (domain_id: number) => request<{ hostname: string; addresses: string[]; expected: string[]; matches: boolean }>('/api/v1/network/dns-check', { method: 'POST', body: JSON.stringify({ domain_id }) });

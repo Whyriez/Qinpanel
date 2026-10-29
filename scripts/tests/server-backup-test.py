@@ -29,6 +29,7 @@ class FixtureEngine(worker.Engine):
     def __init__(self, root, manifest=None):
         self.commands = []
         self.failure = None
+        self.archive_links = {}
         super().__init__(root, self.fake_command)
         self.base.mkdir(parents=True)
         self.work.mkdir()
@@ -76,7 +77,13 @@ class FixtureEngine(worker.Engine):
             if portable and value.get("package_files"):
                 archive.add(self.work / "qonpanel-packages",arcname="qonpanel-packages")
             for root in value["roots"]:
-                archive.add(self.path(root), arcname=root)
+                if root in self.archive_links:
+                    member = tarfile.TarInfo(root)
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = self.archive_links[root]
+                    archive.addfile(member)
+                else:
+                    archive.add(self.path(root), arcname=root)
 
     def extract(self, source, roots):
         # Fixtures contain only regular files/directories. Copy their bytes
@@ -355,6 +362,94 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):engine.create({"id":str(uuid.uuid4()),"passphrase":PASSWORD})
         self.assertTrue(any(call[0]==["systemctl","start","panel-api.service"] for call in engine.commands))
         self.assertFalse((engine.base / "catalog.json").exists())
+
+    def test_backup_with_dangling_nginx_module_alias_is_published_and_inspectable(self):
+        alias = "usr/share/nginx/modules"
+        self.metadata["roots"].append(alias)
+        engine = FixtureEngine(self.source, self.metadata)
+        engine.archive_links[alias] = "../../lib/nginx/modules"
+        request = {"id": str(uuid.uuid4()), "passphrase": PASSWORD}
+        self.assertFalse(engine.path("usr/lib/nginx/modules").exists())
+        engine.create(request)
+        output = engine.base / "exports" / (request["id"] + ".qpb")
+        self.assertTrue(output.is_file())
+        self.assertEqual(engine.run["progress"], 75)
+        self.assertTrue(any(call[0] == ["systemctl", "start", "nginx.service"] for call in engine.commands))
+        self.assertFalse((engine.base / "maintenance").exists())
+        self.assertFalse((engine.base / "journal.json").exists())
+        # Inspection on a fresh target must apply the same archive policy.
+        target = FixtureEngine(self.target)
+        incoming = target.path(worker.INCOMING)
+        incoming.mkdir()
+        archive_id = str(uuid.uuid4())
+        (incoming / (archive_id + ".qpb")).write_bytes(output.read_bytes())
+        _, plain, value, _ = target.inspect({"archive_id": archive_id, "passphrase": PASSWORD})
+        self.assertIn(alias, value["roots"])
+        self.assertNotIn("usr/lib/nginx/modules", value["roots"])
+        with tarfile.open(plain) as archive:
+            link = archive.getmember(alias)
+            self.assertTrue(link.issym())
+            self.assertEqual(link.linkname, "../../lib/nginx/modules")
+        self.assertEqual((self.target / "etc/panel/secret.key").read_bytes(), b"t" * 32)
+
+    def nginx_link_archive(self, target, kind=tarfile.SYMTYPE, child=False, name="usr/share/nginx/modules"):
+        value = copy.deepcopy(self.metadata)
+        value["packages"] = {}
+        value["roots"].append("usr/share/nginx/modules")
+        archive_path = self.root / "nginx-link.tar"
+        with tarfile.open(archive_path, "w") as archive:
+            raw = json.dumps(value).encode()
+            header = tarfile.TarInfo("qonpanel-manifest.json")
+            header.size = len(raw)
+            archive.addfile(header, io.BytesIO(raw))
+            for root in self.metadata["roots"]:
+                archive.add(self.source / root, arcname=root)
+            link = tarfile.TarInfo(name)
+            link.type = kind
+            link.linkname = target
+            archive.addfile(link)
+            if child:
+                archive.addfile(tarfile.TarInfo("usr/share/nginx/modules/injected.so"))
+        return archive_path
+
+    def test_invalid_nginx_alias_restarts_services_without_publishing_backup(self):
+        alias = "usr/share/nginx/modules"
+        self.metadata["roots"].append(alias)
+        engine = FixtureEngine(self.source, self.metadata)
+        engine.archive_links[alias] = "/etc/shadow"
+        with self.assertRaisesRegex(ValueError, "Symlink/hardlink keluar"):
+            engine.create({"id": str(uuid.uuid4()), "passphrase": PASSWORD})
+        self.assertEqual(engine.run["progress"], 55)
+        self.assertTrue(any(call[0] == ["systemctl", "start", "nginx.service"] for call in engine.commands))
+        self.assertTrue(any(call[0] == ["systemctl", "start", "panel-api.service"] for call in engine.commands))
+        self.assertFalse((engine.base / "catalog.json").exists())
+        self.assertFalse((engine.base / "exports").exists())
+        self.assertFalse((engine.base / "maintenance").exists())
+        self.assertFalse((engine.base / "journal.json").exists())
+
+    def test_standard_nginx_module_symlinks_allow_absent_targets_without_dereferencing(self):
+        engine = FixtureEngine(self.target)
+        for target in ("../../lib/nginx/modules", "/usr/lib/nginx/modules",
+                       "../../lib64/nginx/modules", "/usr/lib64/nginx/modules"):
+            with self.subTest(target=target):
+                engine.validate_archive(self.nginx_link_archive(target))
+        self.assertFalse(engine.path("usr/lib/nginx/modules").exists())
+        self.assertFalse(engine.path("usr/lib64/nginx/modules").exists())
+
+    def test_nginx_module_exception_rejects_other_links_hardlinks_and_child_writes(self):
+        engine = FixtureEngine(self.target)
+        for target, kind, child, name in [
+            ("/etc/shadow", tarfile.SYMTYPE, False, "usr/share/nginx/modules"),
+            ("/usr/lib/nginx/modules-extra", tarfile.SYMTYPE, False, "usr/share/nginx/modules"),
+            ("../../../../usr/lib/nginx/modules", tarfile.SYMTYPE, False, "usr/share/nginx/modules"),
+            ("usr/lib/nginx/modules", tarfile.LNKTYPE, False, "usr/share/nginx/modules"),
+            ("/usr/lib/nginx/modules", tarfile.SYMTYPE, False, "etc/nginx/custom-link"),
+            ("/usr/lib/nginx/modules", tarfile.SYMTYPE, True, "usr/share/nginx/modules"),
+        ]:
+            with self.subTest(target=target, kind=kind, child=child, name=name):
+                with self.assertRaises(ValueError):
+                    engine.validate_archive(self.nginx_link_archive(target, kind, child, name))
+        self.assertEqual((self.target / "etc/panel/secret.key").read_bytes(), b"t" * 32)
 
     def test_health_failure_can_restore_target_snapshot_without_merging_databases(self):
         engine, request = self.uploaded();engine.inspect(request)

@@ -375,18 +375,23 @@ async fn connector_install_is_deduplicated_and_running_cloudflare_jobs_cannot_be
 #[tokio::test]
 async fn failed_agent_status_never_reports_configured_and_arbitrary_commands_are_rejected() {
     let f = Fixture::new().await;
-    assert_eq!(
-        f.call(
+    let (status, body) = f
+        .call(
             "GET",
             "/api/v1/network/cloudflare",
             Some("administrator"),
             false,
-            Value::Null
+            Value::Null,
         )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body["error"].as_str().unwrap().contains("panel-agent"));
+    assert!(body.get("configured").is_none());
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&f.state.operations_pool)
         .await
-        .0,
-        StatusCode::BAD_GATEWAY
-    );
+        .unwrap();
+    assert_eq!(jobs, 0);
     assert_eq!(
         f.call(
             "POST",

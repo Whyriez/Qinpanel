@@ -41,15 +41,52 @@ pub struct AiSecretRequest {
 }
 
 pub fn valid_ai_key(value: &str) -> bool {
+    // Service-account-bound Gemini auth keys contain dots (for example AQ.…).
+    // Keep credentials opaque while excluding wrappers and header injection.
     (16..=512).contains(&value.len())
         && value
             .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_formats_accept_dotted_auth_keys_and_preserve_length_limits() {
+        for key in [
+            "AIza_fixture_not_a_real_key_123",
+            "AQ.fixture_not_a_real_auth_key-123.segment_456",
+            "sk-proj-fixture_not_a_real_key_123",
+        ] {
+            assert!(valid_ai_key(key));
+        }
+        assert!(valid_ai_key(&"a".repeat(16)));
+        assert!(valid_ai_key(&format!("AQ.{}", "a".repeat(509))));
+        assert!(!valid_ai_key(&"a".repeat(15)));
+        assert!(!valid_ai_key(&format!("AQ.{}", "a".repeat(510))));
+    }
+
+    #[test]
+    fn key_formats_reject_wrappers_whitespace_controls_and_non_ascii() {
+        for key in [
+            "",
+            "Bearer AQ.fixture_not_a_real_key_123",
+            "\"AQ.fixture_not_a_real_key_123\"",
+            "'AQ.fixture_not_a_real_key_123'",
+            "AQ.fixture key_not_real_123",
+            "AQ.fixture\tkey_not_real_123",
+            "AQ.fixture\r\nInjected: header",
+            "AQ.fixture\0key_not_real_123",
+            "AQ.fixture\u{200b}key_not_real_123",
+            "AQ.fixture\u{a0}key_not_real_123",
+            "AQ.fixture/key_not_real_123",
+            "enc:v1:fixture_not_a_real_cipher",
+        ] {
+            assert!(!valid_ai_key(key));
+        }
+    }
 
     #[test]
     fn rpc_roundtrip_keeps_secret_out_of_debug_and_rejects_free_paths() {

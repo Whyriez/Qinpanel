@@ -1,9 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from './client';
-import { storageAllocationId, generateStorageTls, configureManagedStorage, allocateManagedBucket, issueStorageKey, deleteStorageObject, projectStorageEnvironment, safeDownload, saveStorageConnection, uploadStorageObject, validObjectKey, type StorageConnection } from './storage';
+import { storageAllocationId, fetchStorageTls, generateStorageTls, configureManagedStorage, allocateManagedBucket, issueStorageKey, deleteStorageObject, projectStorageEnvironment, safeDownload, saveStorageConnection, uploadStorageObject, validObjectKey, type StorageConnection } from './storage';
 const connection: StorageConnection = { id: 'fixture-connection', owner_id: 2, site_id: 1, label: 'Project media', provider: 'compatible', endpoint: 'https://objects.example.test', region: 'us-east-1', addressing: 'path', bucket: 'project-media', revision: 4, verified_at: 1, has_credentials: true, created_at: 1, updated_at: 1 };
 afterEach(() => { vi.unstubAllGlobals(); setCsrfToken(null); });
 describe('S3 client contracts', () => {
+  it('keeps unavailable DNS status distinct and accepts legacy inventory responses', async () => {
+    for (const dns of [{ configured: false, zone_name: null }, { available: false, configured: false, zone_name: null }, { available: true, configured: true, zone_name: 'example.test' }]) {
+      const value = { certificate: { revision: 1, state: 'idle', auto_renew: false }, dns };
+      const fetch = vi.fn().mockResolvedValue(Response.json(value)); vi.stubGlobal('fetch', fetch);
+      expect(await fetchStorageTls()).toEqual(value);
+      expect(fetch.mock.calls[0][0]).toBe('/api/v1/storage/managed/tls');
+      expect(fetch.mock.calls[0][1].method).toBeUndefined();
+    }
+  });
+  it('rejects malformed DNS availability instead of exposing an unsafe generate action', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ certificate: { revision: 1, state: 'idle', auto_renew: false }, dns: { available: 'yes', configured: true } })));
+    await expect(fetchStorageTls()).rejects.toThrow('Status sertifikat storage tidak valid');
+  });
   it('requests automated TLS through an authenticated, revision-bound operation without PEM or provider keys', async () => {
     const fetch=vi.fn(async()=>new Response('{}',{status:202})); vi.stubGlobal('fetch',fetch); setCsrfToken('fixture-csrf');
     const request={request_id:storageAllocationId(),expected_revision:1,hostname:'storage.example.test',email:'admin@example.test',confirmed:true};

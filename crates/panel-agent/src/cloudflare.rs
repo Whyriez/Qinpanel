@@ -11,6 +11,17 @@ const DIR: &str = "/etc/panel/cloudflare";
 const CREDENTIALS: &str = "/etc/panel/cloudflare/credentials.enc";
 const MANIFEST: &str = "/etc/panel/cloudflare/managed.json";
 
+pub(crate) async fn operation_guard(
+    request: &CloudflareRequest,
+) -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    if matches!(request, CloudflareRequest::Status) {
+        None
+    } else {
+        Some(LOCK.lock().await)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Credentials {
     pub(crate) account_id: String,
@@ -88,7 +99,13 @@ fn credentials(runner: &dyn SystemRunner) -> Result<Credentials, AgentError> {
     if !ciphertext.starts_with(crypto::CIPHER_PREFIX) {
         return Err(conflict("Kredensial wajib terenkripsi."));
     }
-    let key = crypto::get_or_create_master_key(runner, None)?;
+    // Reading existing credentials must never create a replacement master key.
+    let key: [u8; 32] = runner
+        .read_file(Path::new(crypto::DEFAULT_MASTER_KEY_PATH))?
+        .try_into()
+        .map_err(|_| {
+            conflict("Master key Cloudflare tidak valid; pulihkan kunci dari backup yang sesuai.")
+        })?;
     serde_json::from_str(&crypto::decrypt_value(&key, &ciphertext)?)
         .map_err(|_| invalid("Kredensial tersimpan tidak valid."))
 }
@@ -381,6 +398,7 @@ fn service_state(runner: &dyn SystemRunner, tunnel: &str) -> String {
             &["show", "--property=ActiveState", "--value", &unit(tunnel)],
         )
         .ok()
+        .filter(|output| output.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".into())
@@ -439,7 +457,9 @@ pub fn install_connector(runner: &dyn SystemRunner) -> Result<Value, AgentError>
 }
 
 pub fn execute(runner: &dyn SystemRunner, request: CloudflareRequest) -> Result<Value, AgentError> {
-    directory(runner)?;
+    if !matches!(request, CloudflareRequest::Status) {
+        directory(runner)?;
+    }
     let mut local = manifest(runner)?;
     match request {
         CloudflareRequest::Status => {
@@ -980,6 +1000,77 @@ mod tests {
     const RECORD: &str = "cccccccccccccccccccccccccccccccc";
     const TUNNEL: &str = "01234567-89ab-4cde-8fab-0123456789ab";
     const TOKEN: &str = "fixture_cloudflare_token_123456789";
+
+    #[tokio::test]
+    async fn status_bypasses_remote_operation_lock_without_unlocking_other_operations() {
+        let held = operation_guard(&CloudflareRequest::Tunnels { page: 1 }).await;
+        let status = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            operation_guard(&CloudflareRequest::Status),
+        )
+        .await
+        .expect("status must not queue");
+        assert!(status.is_none());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                operation_guard(&CloudflareRequest::Zones { page: 1 })
+            )
+            .await
+            .is_err()
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                operation_guard(&CloudflareRequest::Zones { page: 1 })
+            )
+            .await
+            .expect("lock released")
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn status_only_reads_existing_files_and_systemd_state() {
+        for configured in [false, true] {
+            let runner = MockSystemRunner::new();
+            if configured {
+                runner.set_file_content(crypto::DEFAULT_MASTER_KEY_PATH, &[7; 32]);
+                let credentials = Credentials {
+                    account_id: ACCOUNT.into(),
+                    api_token: TOKEN.into(),
+                };
+                let encrypted = crypto::encrypt_value(
+                    &[7; 32],
+                    &serde_json::to_string(&credentials).expect("json"),
+                )
+                .expect("cipher");
+                runner.set_file_content(CREDENTIALS, encrypted.as_bytes());
+            }
+            let mut local = Manifest::default();
+            local
+                .tunnels
+                .insert(TUNNEL.into(), ManagedTunnel::default());
+            runner.set_file_content(MANIFEST, &serde_json::to_vec(&local).expect("manifest"));
+            runner.set_response("systemctl", 1, b"active", b"service read failed");
+            let status = execute(&runner, CloudflareRequest::Status).expect("status");
+            assert_eq!(status["configured"], configured);
+            assert_eq!(status["managed_tunnels"][0]["local_status"], "unknown");
+            assert!(!status.to_string().contains(TOKEN));
+            assert!(runner.recorded_actions().iter().all(|action| matches!(action, MockAction::Command { binary, args }
+                if binary == "systemctl" && args == &["show", "--property=ActiveState", "--value", &unit(TUNNEL)])));
+        }
+    }
+
+    #[test]
+    fn status_never_replaces_a_missing_master_key() {
+        let runner = MockSystemRunner::new();
+        runner.set_file_content(CREDENTIALS, b"enc:v1:fixture");
+        assert!(execute(&runner, CloudflareRequest::Status).is_err());
+        assert!(!runner.path_exists(Path::new(crypto::DEFAULT_MASTER_KEY_PATH)));
+        assert!(runner.recorded_actions().is_empty());
+    }
     struct Reply {
         method: String,
         path: String,

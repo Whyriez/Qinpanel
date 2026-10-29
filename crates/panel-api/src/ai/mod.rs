@@ -246,7 +246,15 @@ fn validate_configuration(input: &AiConfiguration) -> Result<(), Error> {
     {
         Some((
             "api_key",
-            "Format API key tidak valid. Tempel key saja tanpa tanda kutip atau awalan Bearer; spasi di dalam key tidak diperbolehkan.",
+            if input
+                .api_key
+                .as_ref()
+                .is_some_and(|key| !(16..=512).contains(&key.len()))
+            {
+                "Panjang API key harus antara 16 dan 512 karakter."
+            } else {
+                "API key mengandung karakter yang tidak didukung. Karakter yang diterima: huruf A-Z/a-z, angka, titik (.), garis bawah (_), dan tanda hubung (-). Tempel key tanpa spasi atau pembungkus."
+            },
         ))
     } else if input.remove_api_key && (input.enabled || input.api_key.is_some()) {
         Some((

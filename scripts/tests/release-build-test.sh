@@ -95,6 +95,7 @@ for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
     [[ -f "$extract/qinpanel-v0.1.0-$target/templates/systemd/panel-api.service" ]]
     cmp -s "$REPO/templates/systemd/panel-proc-hardening.service" "$extract/qinpanel-v0.1.0-$target/templates/systemd/panel-proc-hardening.service"
     cmp -s "$REPO/templates/systemd/panel-runtime-order.conf" "$extract/qinpanel-v0.1.0-$target/templates/systemd/panel-runtime-order.conf"
+    cmp -s "$REPO/templates/systemd/nginx-panel-startup.conf" "$extract/qinpanel-v0.1.0-$target/templates/systemd/nginx-panel-startup.conf"
     [[ "$output" == *'[SUKSES]'* ]]
     primary="$archive"
     (cd "$MOCK_REPO/release" && sha256sum -c "$(basename "$primary").sha256" --status)
@@ -236,6 +237,7 @@ for missing in \
     "${CARGO_TARGET_DIR#"$MOCK_REPO/"}/$FAKE_HOST/release/panel-agent" \
     templates/systemd/panel-proc-hardening.service \
     templates/systemd/panel-runtime-order.conf \
+    templates/systemd/nginx-panel-startup.conf \
     templates/systemd/panel-update.service scripts/bootstrap-install.sh scripts/panel-update-worker.sh \
     templates/nginx/nusa-panel.conf templates/nginx/nusa-reject-unknown.conf templates/nginx/almalinux.conf scripts/platform-selinux.py scripts/mail-auth.py scripts/object-storage-worker.py \
     install.sh uninstall.sh UPGRADE_FROM web/dist/index.html \
@@ -307,6 +309,7 @@ done
 for missing in UPGRADE_FROM templates/systemd/panel-api.service \
     templates/systemd/panel-agent.service templates/systemd/panel-proc-hardening.service \
     templates/systemd/panel-runtime-order.conf \
+    templates/systemd/nginx-panel-startup.conf \
     templates/systemd/panel-update.service scripts/bootstrap-install.sh scripts/panel-update-worker.sh \
     templates/nginx/nusa-panel.conf templates/nginx/nusa-reject-unknown.conf templates/nginx/almalinux.conf scripts/platform-selinux.py scripts/mail-auth.py scripts/object-storage-worker.py; do
     mv "$MOCK_REPO/$missing" "$fixture/withheld"

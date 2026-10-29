@@ -44,6 +44,7 @@ sources=(
     templates/systemd/panel-agent.service
     templates/systemd/panel-proc-hardening.service
     templates/systemd/panel-runtime-order.conf
+    templates/systemd/nginx-panel-startup.conf
     templates/nginx/nusa-panel.conf
     templates/nginx/nusa-reject-unknown.conf
     templates/nginx/almalinux.conf
@@ -62,6 +63,7 @@ destinations=(
     templates/systemd/panel-agent.service
     templates/systemd/panel-proc-hardening.service
     templates/systemd/panel-runtime-order.conf
+    templates/systemd/nginx-panel-startup.conf
     templates/nginx/nusa-panel.conf
     templates/nginx/nusa-reject-unknown.conf
     templates/nginx/almalinux.conf

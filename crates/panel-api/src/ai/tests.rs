@@ -383,12 +383,51 @@ async fn fresh_install_is_disabled_and_settings_never_return_key_material() {
 #[tokio::test]
 async fn key_paste_whitespace_is_normalized_before_sealing_for_both_providers() {
     for provider in [AiProvider::Gemini, AiProvider::Openai] {
-        let ctx = Context::new().await;
-        let (status,body)=ctx.call("PUT","/api/v1/system/ai",Some("aiadmin"),true,json!({"expected_revision":1,"enabled":true,"provider":provider,"model":models(provider)[0],"daily_request_limit":20,"api_key":format!(" \r\n{KEY}\t ")})).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(*ctx.runtime.sealed_keys.lock().expect("sealed"), [KEY]);
-        assert!(!body.to_string().contains(KEY));
+        for key in [KEY, "AQ.fixture_not_a_real_auth_key-123.segment_456"] {
+            let ctx = Context::new().await;
+            let (status,body)=ctx.call("PUT","/api/v1/system/ai",Some("aiadmin"),true,json!({"expected_revision":1,"enabled":true,"provider":provider,"model":models(provider)[0],"daily_request_limit":20,"api_key":format!(" \r\n{key}\t ")})).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(*ctx.runtime.sealed_keys.lock().expect("sealed"), [key]);
+            assert!(!body.to_string().contains(key));
+            assert!(ctx.runtime.calls.lock().expect("calls").is_empty());
+        }
     }
+}
+
+#[tokio::test]
+async fn invalid_keys_report_length_or_characters_without_sealing_or_echoing() {
+    let ctx = Context::new().await;
+    for (key, message) in [
+        ("short".to_owned(), "Panjang API key"),
+        (format!("AQ.{}", "a".repeat(510)), "Panjang API key"),
+        (format!("Bearer {KEY}"), "karakter yang tidak didukung"),
+        (format!("\"{KEY}\""), "karakter yang tidak didukung"),
+        (
+            format!("AQ.fixture\u{200b}{KEY}"),
+            "karakter yang tidak didukung",
+        ),
+        (
+            format!("AQ.fixture\r\nInjected: {KEY}"),
+            "karakter yang tidak didukung",
+        ),
+    ] {
+        let (status, response) = ctx.call("PUT", "/api/v1/system/ai", Some("aiadmin"), true,
+            json!({"expected_revision":1,"enabled":false,"provider":"gemini","model":models(AiProvider::Gemini)[0],"daily_request_limit":20,"api_key":key})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["field"], "api_key");
+        assert!(
+            response["error"]
+                .as_str()
+                .expect("message")
+                .contains(message)
+        );
+        assert!(!response.to_string().contains(&key));
+    }
+    assert!(ctx.runtime.sealed_keys.lock().expect("sealed").is_empty());
+    assert_eq!(
+        store::settings(&ctx.pool).await.expect("settings").revision,
+        1
+    );
 }
 
 #[tokio::test]

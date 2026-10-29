@@ -88,6 +88,35 @@ mod tests {
     }
 
     #[test]
+    fn dotted_gemini_auth_key_roundtrips_without_changing_its_bytes() {
+        let runner = MockSystemRunner::new();
+        runner.set_file_content(crypto::DEFAULT_MASTER_KEY_PATH, &[42; 32]);
+        let value = AiSecret("AQ.fixture_not_a_real_auth_key-123.segment_456".into());
+        let sealed = secret(
+            &runner,
+            AiSecretRequest {
+                provider: AiProvider::Gemini,
+                action: AiSecretAction::Seal,
+                value: value.clone(),
+            },
+        )
+        .expect("seal dotted key");
+        assert!(!sealed.0.contains(&value.0));
+        assert!(!format!("{sealed:?}").contains(&value.0));
+        let opened = secret(
+            &runner,
+            AiSecretRequest {
+                provider: AiProvider::Gemini,
+                action: AiSecretAction::Open,
+                value: sealed,
+            },
+        )
+        .expect("open dotted key");
+        assert_eq!(opened, value);
+        assert!(runner.get_commands().is_empty());
+    }
+
+    #[test]
     fn plaintext_open_and_header_injection_are_rejected() {
         let runner = MockSystemRunner::new();
         for (action, value) in [

@@ -38,6 +38,7 @@ struct TestContext {
     admin_session: String,
     admin_csrf: String,
     pool: panel_db::pool::DbPool,
+    runner: Arc<MockSystemRunner>,
 }
 
 fn extract_cookie_value(cookie_header: &str, cookie_name: &str) -> Option<String> {
@@ -199,6 +200,7 @@ async fn setup_test_context() -> TestContext {
         admin_session,
         admin_csrf,
         pool,
+        runner,
     }
 }
 
@@ -284,6 +286,218 @@ async fn test_doctor_api_check_and_fix() {
     // Verify the job is actually failed in DB
     let job = job_repo.find_by_id("stuck-job-1").await.unwrap().unwrap();
     assert_eq!(job.status, "failed");
+    assert!(
+        !ctx.runner
+            .get_commands()
+            .iter()
+            .any(|command| command == "systemctl restart nginx"
+                || command == "systemctl start nginx")
+    );
+}
+
+#[tokio::test]
+async fn doctor_fix_rejects_missing_csrf_before_any_host_mutation() {
+    let ctx = setup_test_context().await;
+    let response = ctx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/system/doctor/fix")
+                .header(
+                    header::COOKIE,
+                    format!("{}={}", SESSION_COOKIE_NAME, ctx.admin_session),
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(ctx.runner.get_commands().is_empty());
+}
+
+#[tokio::test]
+async fn doctor_fix_returns_actionable_agent_failure_instead_of_a_success_report() {
+    let ctx = setup_test_context().await;
+    ctx.runner
+        .set_response("nft", 1, b"", b"Unable to initialize Netlink socket");
+    let response = ctx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/system/doctor/fix")
+                .header(
+                    header::COOKIE,
+                    format!("{}={}", SESSION_COOKIE_NAME, ctx.admin_session),
+                )
+                .header(CSRF_HEADER_NAME, &ctx.admin_csrf)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(body["code"], "nftables_netlink_unavailable");
+    assert!(
+        !ctx.runner
+            .get_commands()
+            .iter()
+            .any(|command| command == "systemctl restart nginx"
+                || command == "systemctl start nginx")
+    );
+}
+
+#[tokio::test]
+async fn doctor_fix_does_not_claim_success_when_agent_is_offline() {
+    let ctx = setup_test_context().await;
+    ctx._shutdown_tx.send(()).expect("shutdown mock agent");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let response = ctx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/system/doctor/fix")
+                .header(
+                    header::COOKIE,
+                    format!("{}={}", SESSION_COOKIE_NAME, ctx.admin_session),
+                )
+                .header(CSRF_HEADER_NAME, &ctx.admin_csrf)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error")
+            .contains("Diagnosis agent belum tersedia")
+    );
+    assert!(ctx.runner.get_commands().is_empty());
+}
+
+#[tokio::test]
+async fn doctor_fix_enables_nginx_boot_without_restarting_a_running_proxy() {
+    let ctx = setup_test_context().await;
+    ctx.runner
+        .set_response("systemctl is-enabled nginx.service", 1, b"disabled", b"");
+    let response = ctx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/system/doctor/fix")
+                .header(
+                    header::COOKIE,
+                    format!("{}={}", SESSION_COOKIE_NAME, ctx.admin_session),
+                )
+                .header(CSRF_HEADER_NAME, &ctx.admin_csrf)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let commands = ctx.runner.get_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|command| command == "systemctl enable nginx.service")
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command == "systemctl restart nginx"
+                || command == "systemctl start nginx")
+    );
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let report: DoctorReport = serde_json::from_slice(&bytes).expect("report");
+    // This fixture deliberately keeps returning disabled. The refreshed report
+    // must retain the warning rather than assume enablement from a successful RPC.
+    assert_eq!(
+        report
+            .checks
+            .iter()
+            .find(|check| check.id == "nginx_boot_enabled")
+            .expect("boot check")
+            .status,
+        panel_core::doctor::DoctorCheckStatus::Warn
+    );
+}
+
+#[tokio::test]
+async fn doctor_fix_syncs_authoritative_tenant_ports_without_restarting_nginx() {
+    let ctx = setup_test_context().await;
+    let users = SqliteUserRepository::new(ctx.pool.clone());
+    let owner = users
+        .create(&CreateUser {
+            username: "doctortenant".into(),
+            password_hash: "fixture".into(),
+            email: None,
+            role: "user".into(),
+            linux_username: Some("p_doctortenant".into()),
+            linux_uid: Some(10002),
+            plan_id: None,
+        })
+        .await
+        .expect("owner");
+    sqlx::query("INSERT INTO sites(user_id,kind,docroot,status,settings_json,created_at,updated_at) VALUES(?,'nodejs','/fixture','active',?,1,1)")
+        .bind(owner.id).bind(r#"{"port":20051}"#).execute(&ctx.pool).await.expect("site");
+    let response = ctx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/system/doctor/fix")
+                .header(
+                    header::COOKIE,
+                    format!("{}={}", SESSION_COOKIE_NAME, ctx.admin_session),
+                )
+                .header(CSRF_HEADER_NAME, &ctx.admin_csrf)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(ctx.runner.recorded_actions().iter().any(|action| matches!(action,
+        panel_agent::system::MockAction::WriteFile { content, .. }
+        if String::from_utf8_lossy(content).contains("20051") && String::from_utf8_lossy(content).contains("10002"))));
+    assert!(
+        !ctx.runner
+            .get_commands()
+            .iter()
+            .any(|command| command == "systemctl restart nginx"
+                || command == "systemctl start nginx")
+    );
 }
 
 #[tokio::test]

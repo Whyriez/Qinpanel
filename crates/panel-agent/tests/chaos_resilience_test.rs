@@ -106,8 +106,9 @@ async fn test_chaos_scenario_2_nginx_service_down_detection_and_remediation() {
     assert!(nginx_check.remediation_hint.is_some());
     assert!(nginx_check.fixable);
 
-    // 2. Doctor auto-remediation triggers service restart
+    // 2. Doctor auto-remediation starts an inactive service without restarting it.
     runner.set_response("systemctl", 0, b"active (running)", b"");
+    runner.set_response("systemctl is-active nginx", 3, b"inactive", b"");
     let fix_resp = reliability_mgr
         .fix_doctor(&SystemDoctorFixRequest {
             target_checks: vec!["service_nginx".to_string()],
@@ -120,6 +121,18 @@ async fn test_chaos_scenario_2_nginx_service_down_detection_and_remediation() {
         .find(|r| r.item_id == "service_nginx")
         .expect("service_nginx remediation result");
     assert!(nginx_fix_result.success);
+    assert!(
+        runner
+            .get_commands()
+            .iter()
+            .any(|command| command == "systemctl start nginx")
+    );
+    assert!(
+        !runner
+            .get_commands()
+            .iter()
+            .any(|command| command == "systemctl restart nginx")
+    );
 }
 
 #[tokio::test]
