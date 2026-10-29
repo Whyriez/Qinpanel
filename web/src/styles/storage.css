@@ -79,3 +79,4 @@
 @media(max-width:560px){.storage-managed{padding:16px}.storage-managed .storage-actions{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch}.storage-modal textarea{font-size:16px}}
 
 @media(max-width:560px){.storage-dialog-footer:has(>button){display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr)}.storage-dialog-footer:has(>button)>button:only-child{grid-column:1/-1}.storage-dialog-footer>button{white-space:normal}}
+.storage-management-heading{margin:28px 0 18px}.storage-management-heading h2{scroll-margin-top:100px}.storage-managed .storage-notice p{margin:0 0 10px}.storage-modal .storage-notice p{margin:0 0 10px}

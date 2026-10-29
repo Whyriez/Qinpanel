@@ -18,6 +18,8 @@ export function StoragePage({ scopeSiteId, scopeOwnerId }: { scopeSiteId?: numbe
   const english = i18n.language.startsWith('en'); const t = (id: string, en: string) => english ? en : id;
   const querySite = Number(route.search.get('site')); const siteId = scopeSiteId ?? (Number.isSafeInteger(querySite) && querySite > 0 ? querySite : undefined);
   const [context, setContext] = useState<StorageContext>({ owners: [], sites: [], upload_limit_bytes: 33554432 });
+  const [contextLoading, setContextLoading] = useState(true); const [contextError, setContextError] = useState(''); const [contextRefresh, setContextRefresh] = useState(0);
+  const management = useRef<HTMLHeadingElement>(null);
   const [connections, setConnections] = useState<StorageConnection[]>([]); const [selectedId, setSelectedId] = useState(route.search.get('connection') ?? '');
   const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   const [refresh, setRefresh] = useState(0); const [dialog, setDialog] = useState<StorageConnection | 'new' | null>(null);
@@ -26,12 +28,24 @@ export function StoragePage({ scopeSiteId, scopeOwnerId }: { scopeSiteId?: numbe
   const connection = connections.find(value => value.id === selectedId); const admin = user?.role === 'admin';
   useEffect(() => {
     const controller = new AbortController(); setLoading(true); setError('');
-    Promise.all([fetchStorageContext(controller.signal), fetchStorageConnections(siteId, controller.signal)]).then(([context, response]) => {
-      if (controller.signal.aborted) return; setContext(context); setConnections(response.connections);
+    fetchStorageConnections(siteId, controller.signal).then(response => {
+      if (controller.signal.aborted) return; setConnections(response.connections);
       setSelectedId(previous => response.connections.some(value => value.id === previous) ? previous : response.connections[0]?.id ?? '');
     }).catch(error => { if (!controller.signal.aborted) setError(message(error)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [siteId, refresh, user?.id]);
+  useEffect(() => {
+    const controller = new AbortController(); setContextLoading(true); setContextError('');
+    fetchStorageContext(controller.signal).then(value => { if (!controller.signal.aborted) setContext(value); })
+      .catch(error => { if (!controller.signal.aborted) setContextError(message(error)); })
+      .finally(() => { if (!controller.signal.aborted) setContextLoading(false); });
+    return () => controller.abort();
+  }, [contextRefresh, refresh, user?.id]);
+  useEffect(() => {
+    const update = () => setContextRefresh(value => value + 1);
+    window.addEventListener('focus', update);
+    return () => window.removeEventListener('focus', update);
+  }, []);
   const act = async (action: () => Promise<unknown>, success: string) => {
     setBusy(true); setError(''); setNotice('');
     try { await action(); setNotice(success); setDanger(null); setRefresh(value => value + 1); }
@@ -39,12 +53,13 @@ export function StoragePage({ scopeSiteId, scopeOwnerId }: { scopeSiteId?: numbe
   };
   return <section className="storage-page" aria-label="Storage S3">
     <header className="storage-heading"><div><h1>Storage S3</h1><p>{t('File project di bucket Anda, dengan akses yang terpisah per tenant.', 'Project files in your buckets, with tenant-scoped access.')}</p></div>
-      <div className="storage-actions"><button type="button" disabled={loading || busy || objectBusy} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={16} /> {t('Muat ulang', 'Refresh')}</button>{admin && <button type="button" className="button-primary" disabled={busy || objectBusy || loading || !context.owners.length} onClick={() => setDialog('new')}><Plus size={16} /> {t('Hubungkan S3', 'Connect S3')}</button>}</div>
+      <div className="storage-actions"><button type="button" disabled={loading || busy || objectBusy} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={16} /> {t('Muat ulang', 'Refresh')}</button>{admin && <button type="button" className="button-primary" disabled={busy || objectBusy || loading || contextLoading || !!contextError || !context.owners.length} onClick={() => setDialog('new')}><Plus size={16} /> {t('Hubungkan S3', 'Connect S3')}</button>}</div>
     </header>
-    {admin && <ManagedStorage onChanged={() => setRefresh(value => value + 1)} refreshKey={refresh} disabled={busy || objectBusy} english={english} context={context} ownerId={scopeOwnerId} siteId={siteId} onCreated={value => { setSelectedId(value.id); setRefresh(current => current + 1); }} />}
+    {admin && <ManagedStorage onChanged={() => setRefresh(value => value + 1)} refreshKey={refresh} disabled={busy || objectBusy} english={english} context={context} contextLoading={contextLoading} contextError={contextError} onRefreshContext={() => setContextRefresh(value => value + 1)} ownerId={scopeOwnerId} siteId={siteId} onManage={() => { management.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); management.current?.focus({ preventScroll: true }); }} onCreated={value => { setSelectedId(value.id); setRefresh(current => current + 1); }} />}
     {siteId && <p className="storage-note">{t('Koneksi untuk project ini.', 'Connections for this project.')} {!scopeSiteId && <a href="/storage">{t('Lihat semua storage', 'View all storage')}</a>}</p>}
     {error && <p role="alert" className="storage-error">{error}</p>}{notice && <p role="status" className="storage-notice">{notice}</p>}
-    {loading ? <p role="status" className="storage-note">{t('Memuat koneksi storage…', 'Loading storage connections…')}</p> : !connections.length ? <div className="storage-empty"><HardDrive size={30} /><h2>{t('Belum ada koneksi storage', 'No storage connections yet')}</h2><p>{admin ? t('Buat bucket melalui Storage Qinpanel atau hubungkan bucket AWS S3, R2, Supabase, dan penyedia S3 lainnya.', 'Create a bucket with Qinpanel storage or connect AWS S3, R2, Supabase, and other S3 providers.') : t('Minta administrator menyiapkan koneksi bucket untuk tenant atau project Anda.', 'Ask your administrator to connect a bucket for your tenant or project.')}</p><p className="storage-note">{t('Kapasitas dan tagihan mengikuti penyedia. Menyimpan koneksi tidak membuat bucket atau mengubah file project.', 'Capacity and billing follow the provider. Saving a connection does not create a bucket or change project files.')}</p></div> : <>
+    <div className="storage-management-heading"><h2 ref={management} tabIndex={-1}>{t('Manajemen bucket & file', 'Bucket & file management')}</h2><p className="storage-note">{t('Pilih bucket untuk melihat file, mengunggah, mengunduh, atau menghapus object. Access key aplikasi tersedia pada bucket Qinpanel yang siap.', 'Choose a bucket to browse, upload, download or delete objects. Application access keys are available for ready Qinpanel buckets.')}</p></div>
+    {loading ? <p role="status" className="storage-note">{t('Memuat koneksi storage…', 'Loading storage connections…')}</p> : !connections.length ? <div className="storage-empty"><HardDrive size={30} /><h2>{t('Belum ada bucket di panel', 'No buckets added yet')}</h2><p>{admin ? t('Buat bucket melalui Storage Qinpanel atau hubungkan bucket AWS S3, R2, Supabase, dan penyedia S3 lainnya.', 'Create a bucket with Qinpanel storage or connect AWS S3, R2, Supabase, and other S3 providers.') : t('Minta administrator menyiapkan koneksi bucket untuk tenant atau project Anda.', 'Ask your administrator to connect a bucket for your tenant or project.')}</p><p className="storage-note">{t('Setelah bucket ditambahkan, kelola file melalui daftar object, upload, download, dan hapus di bagian ini.', 'After adding a bucket, manage its files using the object list, upload, download and delete controls here.')}</p></div> : <>
       <label className="storage-mobile-picker">{t('Pilih koneksi', 'Choose connection')}<select value={selectedId} disabled={busy || objectBusy} onChange={e => { setSelectedId(e.target.value); setNotice(''); }} aria-label={t('Pilih koneksi storage', 'Choose storage connection')}>{connections.map(value => <option value={value.id} key={value.id}>{value.label} · {value.bucket}</option>)}</select></label>
       <div className="storage-layout"><aside className="storage-connections" aria-label={t('Koneksi storage', 'Storage connections')}>{connections.map(value => <button type="button" key={value.id} className="storage-connection" aria-current={value.id === selectedId} disabled={busy || objectBusy} onClick={() => { setSelectedId(value.id); setNotice(''); }}>{value.label}<small>{value.managed ? 'Qinpanel Storage' : providerName(value.provider)} · {value.bucket}</small></button>)}</aside>
         {connection && <div className="storage-content"><div className="storage-toolbar"><h2>{connection.label}</h2><div className="storage-actions"><button type="button" disabled={busy || objectBusy} onClick={() => act(() => testStorageConnection(connection), t('Daftar bucket berhasil diakses. Izin download dan tulis mengikuti policy provider.', 'Bucket listing verified. Download and write permissions follow provider policy.'))}>{busy ? t('Memproses…', 'Processing…') : t('Uji koneksi', 'Test connection')}</button>{admin && !connection.managed && <><button type="button" disabled={busy || objectBusy} onClick={() => setDialog(connection)}>{t('Edit koneksi', 'Edit connection')}</button><button type="button" disabled={busy || objectBusy} onClick={() => setDanger('disconnect')}>{t('Lepas koneksi', 'Disconnect')}</button></>}</div></div>
@@ -54,7 +69,7 @@ export function StoragePage({ scopeSiteId, scopeOwnerId }: { scopeSiteId?: numbe
           {connection.last_operation === 'unknown' && <p role="status" className="storage-notice">{t('Hasil transfer terakhir belum dipastikan. Periksa daftar object sebelum mencoba kembali.', 'The last transfer outcome is unknown. Check the object listing before retrying.')}</p>}
           {connection.last_operation === 'running' && <p role="status" className="storage-note">{t('Ada operasi yang masih berjalan di koneksi ini.', 'An operation is still running on this connection.')}</p>}
           {connection.managed && connection.managed_state !== 'ready' ? <p role="status" className="storage-notice">{t('Alokasi bucket belum siap. Administrator perlu menyelesaikan operasi storage yang tertunda.', 'The bucket allocation is not ready. An administrator must complete the pending storage operation.')}</p> : <ObjectBrowser key={`${connection.id}:${connection.revision}:${refresh}`} connection={connection} english={english} onBusy={setObjectBusy} />}
-          <ProjectBinding connection={connection} context={context} english={english} locked={!!scopeSiteId || busy || objectBusy} onChanged={() => setRefresh(value => value + 1)} />
+          <ProjectBinding connection={connection} context={context} english={english} locked={!!scopeSiteId || busy || objectBusy || contextLoading || !!contextError} onChanged={() => setRefresh(value => value + 1)} />
           <details className="mt-6"><summary>{t('Konfigurasi aplikasi', 'Application configuration')}</summary><p className="storage-note">{t('Tambahkan konfigurasi ini melalui environment/secret project Anda. Ambil access key dari pengelola storage; perubahan tidak diterapkan otomatis atau memulai ulang aplikasi.', 'Add this configuration through your project environment/secrets. Obtain access keys from the storage manager; changes are not applied automatically and do not restart the application.')}</p><pre className="storage-code">{projectStorageEnvironment(connection)}</pre></details>
           {admin && !connection.managed && <details className="mt-5"><summary>{t('Buat bucket baru di provider', 'Create a new bucket at the provider')}</summary><p className="storage-note">{t('Gunakan hanya jika bucket belum ada dan credential memiliki izin membuat bucket. Operasi dapat dikenai biaya provider.', 'Use only if the bucket does not exist and the credentials allow bucket creation. Provider charges may apply.')}</p><button type="button" disabled={busy || objectBusy} onClick={() => setDanger('create')}>{t('Buat bucket baru', 'Create new bucket')}</button></details>}
         </div>}

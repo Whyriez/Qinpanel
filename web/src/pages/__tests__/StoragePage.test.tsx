@@ -8,6 +8,12 @@ describe('Storage page', () => {
   it('provides a named storage page and accessible loading without fake usage totals', () => {
     const html = renderToString(<StoragePage />); expect(html).toContain('Storage S3'); expect(html).toContain('role="status"'); expect(html).toContain('Hubungkan S3'); expect(html).not.toContain('0 B'); expect(html).not.toContain('secret_key');
   });
+  it('names the bucket and file management area independently of service settings', () => {
+    const html = renderToString(<StoragePage />);
+    expect(html).toContain('Manajemen bucket &amp; file');
+    expect(html).toContain('mengunggah, mengunduh, atau menghapus object');
+    expect(html).toContain('tabindex="-1"');
+  });
   it('supports English copy and scoped project access', async () => {
     await i18n.changeLanguage('en');
     try { const html = renderToString(<StoragePage scopeSiteId={4} scopeOwnerId={2} />); expect(html).toContain('Connections for this project'); expect(html).toContain('Connect S3'); }
