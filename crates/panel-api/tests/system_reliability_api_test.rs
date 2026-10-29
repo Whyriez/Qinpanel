@@ -178,8 +178,8 @@ async fn setup_test_context() -> TestContext {
         .await
         .unwrap();
 
+    assert_eq!(login_res.status(), StatusCode::OK, "admin login failed");
     let mut admin_session = String::new();
-    let mut admin_csrf = String::new();
 
     for (k, v) in login_res.headers() {
         if k == header::SET_COOKIE {
@@ -187,11 +187,21 @@ async fn setup_test_context() -> TestContext {
             if let Some(s) = extract_cookie_value(cookie_str, SESSION_COOKIE_NAME) {
                 admin_session = s;
             }
-            if let Some(c) = extract_cookie_value(cookie_str, CSRF_HEADER_NAME) {
-                admin_csrf = c;
-            }
         }
     }
+    assert!(
+        !admin_session.is_empty(),
+        "login omitted the session cookie"
+    );
+
+    // Login returns the CSRF token in JSON; x-csrf-token is a request header.
+    let login_body = login_res.into_body().collect().await.unwrap().to_bytes();
+    let login_json: serde_json::Value = serde_json::from_slice(&login_body).unwrap();
+    let admin_csrf = login_json["csrf_token"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .expect("login omitted the CSRF token")
+        .to_owned();
 
     TestContext {
         app,
