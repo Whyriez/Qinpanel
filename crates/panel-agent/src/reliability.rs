@@ -364,6 +364,37 @@ impl ReliabilityManager {
         })
     }
 
+    /// Start an inactive Nginx only after syntax validation; preserve healthy connections.
+    fn fix_nginx_service(&self) -> DoctorRemediationResultDto {
+        let active = matches!(self.runner.run_command("systemctl", &["is-active", "nginx"]), Ok(out) if out.status.success());
+        let (success, msg) = if active {
+            (true, "Layanan Nginx sudah aktif; tidak diubah.".to_string())
+        } else if !matches!(self.runner.run_command("nginx", &["-t", "-c", "/etc/nginx/nginx.conf"]), Ok(out) if out.status.success())
+        {
+            (
+                false,
+                "Sintaks Nginx tidak valid; layanan tidak diubah. Periksa konfigurasi Nginx."
+                    .to_string(),
+            )
+        } else {
+            match self.runner.run_command("systemctl", &["start", "nginx"]) {
+                Ok(out) if out.status.success() => {
+                    (true, "Layanan Nginx berhasil diaktifkan.".to_string())
+                }
+                _ => (
+                    false,
+                    "Layanan Nginx gagal diaktifkan. Periksa status dan log nginx.service."
+                        .to_string(),
+                ),
+            }
+        };
+        DoctorRemediationResultDto {
+            item_id: "service_nginx".to_string(),
+            success,
+            message: msg,
+        }
+    }
+
     /// Automatically fixes issues detected by doctor diagnostics.
     pub fn fix_doctor(
         &self,
@@ -408,36 +439,8 @@ impl ReliabilityManager {
             });
         }
 
-        // Starting an inactive service never tears down an existing connection.
-        // A healthy Nginx must not be restarted by an unrelated remediation.
         if targets.iter().any(|c| c == "service_nginx") {
-            let active = matches!(self.runner.run_command("systemctl", &["is-active", "nginx"]), Ok(out) if out.status.success());
-            let (success, msg) = if active {
-                (true, "Layanan Nginx sudah aktif; tidak diubah.".to_string())
-            } else if !matches!(self.runner.run_command("nginx", &["-t", "-c", "/etc/nginx/nginx.conf"]), Ok(out) if out.status.success())
-            {
-                (
-                    false,
-                    "Sintaks Nginx tidak valid; layanan tidak diubah. Periksa konfigurasi Nginx."
-                        .to_string(),
-                )
-            } else {
-                match self.runner.run_command("systemctl", &["start", "nginx"]) {
-                    Ok(out) if out.status.success() => {
-                        (true, "Layanan Nginx berhasil diaktifkan.".to_string())
-                    }
-                    _ => (
-                        false,
-                        "Layanan Nginx gagal diaktifkan. Periksa status dan log nginx.service."
-                            .to_string(),
-                    ),
-                }
-            };
-            results.push(DoctorRemediationResultDto {
-                item_id: "service_nginx".to_string(),
-                success,
-                message: msg,
-            });
+            results.push(self.fix_nginx_service());
         }
 
         if targets.iter().any(|c| c == "nginx_boot_enabled") {

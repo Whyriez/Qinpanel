@@ -241,7 +241,7 @@ async fn recheck_db_integrity_post_fix(pool: &panel_db::DbPool) -> DoctorCheckIt
     }
 }
 
-async fn recover_jobs_safe(job_repo: &SqliteJobRepository) -> Result<u64, Response> {
+async fn recover_jobs_safe(job_repo: &SqliteJobRepository) -> Result<u64, &'static str> {
     match job_repo.recover_interrupted_jobs().await {
         Ok(n) => {
             info!("Memulihkan {} pekerjaan terinterupsi", n);
@@ -249,10 +249,9 @@ async fn recover_jobs_safe(job_repo: &SqliteJobRepository) -> Result<u64, Respon
         }
         Err(e) => {
             error!("Gagal memulihkan pekerjaan terinterupsi: {}", e);
-            Err(doctor_failure(
-                StatusCode::INTERNAL_SERVER_ERROR,
+            Err(
                 "Status pekerjaan belum dapat dipulihkan. Muat ulang diagnosis sebelum mencoba lagi.",
-            ))
+            )
         }
     }
 }
@@ -347,7 +346,7 @@ pub async fn fix_system_doctor_handler(
     // 1. Recover interrupted jobs
     let recovered = match recover_jobs_safe(&job_repo).await {
         Ok(recovered) => recovered,
-        Err(response) => return response,
+        Err(message) => return doctor_failure(StatusCode::INTERNAL_SERVER_ERROR, message),
     };
 
     // 2. SQLite WAL truncate checkpoint
