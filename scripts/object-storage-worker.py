@@ -47,6 +47,25 @@ class StorageError(Exception):
     """Only safe labels and machine state may be returned through the agent."""
 
 
+class StorageSetupError(StorageError):
+    """A failed setup carries a fixed stage independently of its diagnostic text."""
+
+    def __init__(self, message, stage):
+        super().__init__(message)
+        self.stage = stage
+
+
+def error_response(error):
+    response = {"error": str(error)}
+    if isinstance(error, StorageSetupError) and error.stage in {
+        "certificate validation", "verified engine installation",
+        "Nginx configuration validation", "storage service startup",
+        "storage readiness", "HTTPS activation",
+    }:
+        response["stage"] = error.stage
+    return response
+
+
 def command(args, timeout=60):
     # Never return argv, stdout/stderr, PEM or credentials in a control-plane error.
     program = Path(args[0]).name if args else ""
@@ -582,8 +601,8 @@ class Controller:
                     rollback_failures.append(label)
             message = f"Storage setup failed during {stage}. {reason} Storage service: {initial_status}. "
             if rollback_failures:
-                raise StorageError(message + "Rollback failed for: " + ", ".join(rollback_failures) + ". Inspect the server; object data was retained.") from None
-            raise StorageError(message + "Configuration was restored and object data retained.") from None
+                raise StorageSetupError(message + "Rollback failed for: " + ", ".join(rollback_failures) + ". Inspect the server; object data was retained.", stage) from None
+            raise StorageSetupError(message + "Configuration was restored and object data retained.", stage) from None
         return self.status()
 
     def allocate(self, request):
@@ -719,7 +738,7 @@ if __name__ == "__main__":
     try:
         main()
     except StorageError as error:
-        print(json.dumps({"error": str(error)}))
+        print(json.dumps(error_response(error)))
         # systemd must fail startup when the post-start socket ACL is missing.
         # Typed stdin returns its safe JSON error through the agent instead.
         sys.exit(1 if sys.argv[1:] == ["--socket-ready"] else 0)

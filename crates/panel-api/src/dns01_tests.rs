@@ -83,9 +83,14 @@ async fn fixture() -> Fixture {
                         ))
                     }
                 }
-                panel_proto::RequestPayload::Dns01(Dns01Request::Status) => Ok(
-                    panel_proto::ResponsePayload::Dns01(status.lock().unwrap().clone()),
-                ),
+                panel_proto::RequestPayload::Dns01(Dns01Request::Status) => {
+                    let value = status.lock().unwrap().clone();
+                    if value["fail_status"] == true {
+                        Err("fixture_secret_status_response".into())
+                    } else {
+                        Ok(panel_proto::ResponsePayload::Dns01(value))
+                    }
+                }
                 panel_proto::RequestPayload::Dns01(Dns01Request::Cleanup { .. }) => {
                     Ok(panel_proto::ResponsePayload::Dns01(json!({"cleaned":true})))
                 }
@@ -828,4 +833,33 @@ async fn dns01_propagation_waits_for_both_resolvers_and_bounds_missing_or_hangin
         .await;
         assert_eq!(result.is_ok(), mode == 0);
     }
+}
+
+#[tokio::test]
+async fn storage_issuance_classifies_agent_status_failure_before_acme_and_releases_lease() {
+    let f = fixture().await;
+    f.provider.lock().unwrap()["fail_status"] = json!(true);
+    let Err(error) = issue_storage_certificate(
+        &f.state.pool,
+        &f.state.agent_client,
+        "storage.example.com",
+        "admin@example.com",
+        "aa2cc435-972c-4327-aa11-eb1db6422026",
+    )
+    .await
+    else {
+        panic!("expected agent failure");
+    };
+    assert_eq!(error, DNS_AGENT_STATUS_ERROR);
+    assert!(!error.contains("fixture_secret"));
+    let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM acme_accounts")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(accounts, 0);
+    let leases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dns01_lock WHERE token IS NOT NULL")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(leases, 0);
 }

@@ -314,13 +314,88 @@ async fn process(
         return Err("Tugas sertifikat tidak boleh diputar ulang otomatis.".into());
     }
     let result = issue_and_apply(pool, services, &row).await;
-    if result.is_err() {
-        // Provider/PEM/transport details never enter durable job or audit logs.
-        let _=sqlx::query("UPDATE managed_storage_tls SET state='failed',auto_renew=0,updated_at=?,error='Penerbitan atau pemasangan gagal; perpanjangan otomatis dijeda. Periksa DNS-01 dan layanan storage, lalu pilih Generate lagi. Periksa rollback bila konfigurasi belum sehat.' WHERE id=1 AND revision=? AND state='issuing'").bind(now()).bind(row.revision).execute(pool).await;
+    if let Err(message) = result {
+        // Only static, approved messages reach durable metadata and job logs.
+        let message = format!("{message} Perpanjangan otomatis dijeda.");
+        let _=sqlx::query("UPDATE managed_storage_tls SET state='failed',auto_renew=0,updated_at=?,error=? WHERE id=1 AND revision=? AND state='issuing'")
+            .bind(now()).bind(&message).bind(row.revision).execute(pool).await;
+        return Err(message);
     }
-    result.map_err(|_|"Penerbitan sertifikat storage gagal; periksa status TLS dan DNS-01. Detail credential tidak dicatat.".into())
+    Ok(())
 }
-async fn issue_and_apply(pool: &DbPool, services: &Services, row: &Binding) -> Result<(), String> {
+const ISSUANCE_FAILED: &str = "Penerbitan sertifikat storage gagal; periksa status TLS dan DNS-01. Detail credential tidak dicatat.";
+
+// Exact matching never forwards provider responses, tokens, PEM or transport details.
+fn issuance_failure(error: &str) -> &'static str {
+    match error {
+        crate::dns01::DNS_AGENT_STATUS_ERROR => {
+            "Status DNS-01 pada panel-agent tidak dapat dibaca sebelum penerbitan. Periksa layanan panel-agent dan koneksi IPC panel."
+        }
+        crate::dns01::TXT_PRESENT_ERROR => {
+            "Pembuatan TXT challenge DNS-01 melalui panel-agent gagal. Periksa izin Zone DNS Edit, cakupan zona token, konflik record challenge dan akses agent ke API Cloudflare."
+        }
+        crate::dns01::TXT_PROPAGATION_ERROR => {
+            "Validasi DNS-01 storage melewati batas tunggu: TXT challenge belum cocok pada kedua resolver publik, atau resolver tidak dapat diakses dari server. Periksa delegasi DNS dan koneksi HTTPS ke cloudflare-dns.com serta dns.google sebelum mencoba lagi."
+        }
+        "Akun ACME DNS-01 tidak tersedia." => {
+            "Pendaftaran atau pemuatan akun Let's Encrypt gagal. Periksa email sertifikat dan koneksi server ke layanan ACME."
+        }
+        "CA menolak order DNS." => {
+            "Order sertifikat storage belum berhasil dibuat di Let's Encrypt. Periksa kelayakan domain, batas penerbitan dan koneksi server ke layanan ACME."
+        }
+        "Otorisasi DNS gagal."
+        | "CA belum dapat memeriksa TXT."
+        | "Validasi DNS-01 gagal di CA."
+        | "Order DNS belum siap." => {
+            "Validasi domain oleh Let's Encrypt belum berhasil. Periksa TXT challenge, kebijakan CAA domain dan koneksi server ke layanan ACME."
+        }
+        "Finalisasi DNS gagal." | "Sertifikat DNS belum tersedia." => {
+            "Validasi DNS telah selesai, tetapi finalisasi atau pengambilan sertifikat storage gagal. Periksa koneksi server ke layanan ACME."
+        }
+        "Batas waktu order DNS-01 habis." => {
+            "Penerbitan sertifikat storage melewati batas waktu. Periksa layanan ACME, propagasi DNS dan koneksi server sebelum mencoba lagi."
+        }
+        "Token DNS berubah; buat order baru." => {
+            "Token DNS-01 berubah saat penerbitan. Muat ulang status sebelum membuat permintaan baru."
+        }
+        "Cleanup TXT belum selesai; jurnal dipertahankan. Bersihkan sebelum order berikutnya. Sertifikat aktif dipertahankan." => {
+            "Cleanup TXT DNS-01 belum selesai. Periksa izin DNS Edit dan selesaikan cleanup challenge di pengaturan Sertifikat DNS-01 sebelum mencoba lagi."
+        }
+        _ => ISSUANCE_FAILED,
+    }
+}
+
+fn configuration_failure(result: &Value) -> &'static str {
+    match result["stage"].as_str() {
+        Some("certificate validation") => {
+            "Sertifikat storage sudah diterbitkan, tetapi validasi lokal sertifikat dan key saat pemasangan gagal. Periksa OpenSSL dan sertifikat storage."
+        }
+        Some("verified engine installation") => {
+            "Sertifikat storage sudah diterbitkan, tetapi pemasangan engine SeaweedFS gagal. Periksa akses unduhan GitHub, batas waktu, kapasitas disk dan integritas engine. Periksa rollback sebelum mencoba lagi."
+        }
+        Some("Nginx configuration validation") => {
+            "Sertifikat storage sudah diterbitkan, tetapi konfigurasi Nginx storage gagal divalidasi. Periksa nginx -t dan rollback konfigurasi."
+        }
+        Some("storage service startup") => {
+            "Sertifikat storage sudah diterbitkan, tetapi startup layanan qonpanel-object-storage.service gagal. Periksa journal layanan storage dan rollback."
+        }
+        Some("storage readiness") => {
+            "Sertifikat storage sudah diterbitkan, tetapi engine S3 belum siap. Periksa journal layanan storage, socket S3 dan rollback."
+        }
+        Some("HTTPS activation") => {
+            "Sertifikat storage sudah diterbitkan, tetapi aktivasi atau verifikasi HTTPS storage gagal. Periksa Nginx, listener HTTPS dan rollback."
+        }
+        _ => {
+            "Pemasangan layanan storage gagal setelah sertifikat diterbitkan. Periksa layanan storage, engine dan rollback. Rincian tahap belum tersedia."
+        }
+    }
+}
+
+async fn issue_and_apply(
+    pool: &DbPool,
+    services: &Services,
+    row: &Binding,
+) -> Result<(), &'static str> {
     let host = row.hostname.as_deref().ok_or("Domain tidak tersedia.")?;
     let email = row.email.as_deref().ok_or("Email tidak tersedia.")?;
     let revision = row
@@ -338,24 +413,25 @@ async fn issue_and_apply(pool: &DbPool, services: &Services, row: &Binding) -> R
         || Some(&zone) != row.zone_name.as_ref()
         || current != revision
     {
-        return Err("Zona atau token DNS-01 berubah.".into());
+        return Err("Zona atau token DNS-01 berubah.");
     }
     let certificate = services
         .runtime
         .certificate(pool.clone(), host.into(), email.into(), revision.into())
-        .await?;
+        .await
+        .map_err(|error| issuance_failure(&error))?;
     let validity = panel_core::panel_tls::validate_dns_candidate(
         &certificate.chain,
         &certificate.key.0,
         &[host.into()],
         now(),
     )
-    .map_err(str::to_owned)?;
+    .map_err(|_| "Sertifikat storage tidak valid untuk domain dan private key yang diminta. Layanan storage belum diubah.")?;
     let current_row = binding(pool)
         .await
         .map_err(|_| "Revisi storage gagal dimuat.")?;
     if current_row.revision != row.revision || current_row.state != "issuing" {
-        return Err("Permintaan storage sudah berubah.".into());
+        return Err("Permintaan storage sudah berubah.");
     }
     let result = services
         .runtime
@@ -365,17 +441,22 @@ async fn issue_and_apply(pool: &DbPool, services: &Services, row: &Binding) -> R
             private_key_pem: certificate.key,
         })
         .await
-        .map_err(|_| "Pemasangan sertifikat gagal.")?;
+        .map_err(|_| "Pemasangan sertifikat storage gagal. Periksa status layanan storage dan rollback sebelum mencoba lagi.")?;
+    if result.get("error").is_some() {
+        return Err(configuration_failure(&result));
+    }
     if result["configured"] != true
         || result["running"] != true
         || result["endpoint"] != format!("https://{host}")
     {
-        return Err("Listener HTTPS storage belum sehat.".into());
+        return Err(
+            "Listener HTTPS storage belum sehat. Periksa status layanan storage dan rollback sebelum mencoba lagi.",
+        );
     }
     let changed=sqlx::query("UPDATE managed_storage_tls SET state='active',not_before=?,not_after=?,renew_at=?,updated_at=?,error=NULL WHERE id=1 AND revision=? AND state='issuing'")
         .bind(validity.not_before).bind(validity.not_after).bind(panel_core::panel_tls::renewal_at(validity.not_before,validity.not_after,None)).bind(now()).bind(row.revision).execute(pool).await.map_err(|_|"Metadata sertifikat gagal disimpan.")?;
     if changed.rows_affected() != 1 {
-        return Err("Revisi sertifikat berubah setelah pemasangan.".into());
+        return Err("Revisi sertifikat berubah setelah pemasangan.");
     }
     Ok(())
 }
@@ -468,6 +549,9 @@ mod tests {
         applied: AtomicUsize,
         fail: AtomicBool,
         wrong_name: AtomicBool,
+        propagation_fail: AtomicBool,
+        apply_fail: AtomicBool,
+        helper_failure: AtomicUsize,
     }
     impl StorageRuntime for Runtime {
         fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
@@ -489,6 +573,9 @@ mod tests {
                 if self.fail.load(Ordering::SeqCst) {
                     return Err("fixture_secret_must_not_persist".into());
                 }
+                if self.propagation_fail.load(Ordering::SeqCst) {
+                    return Err(crate::dns01::TXT_PROPAGATION_ERROR.into());
+                }
                 let hostname = if self.wrong_name.load(Ordering::SeqCst) {
                     "other.example.test".into()
                 } else {
@@ -509,6 +596,19 @@ mod tests {
             Box::pin(async move {
                 assert!(matches!(request, ManagedStorageRequest::Configure { .. }));
                 self.applied.fetch_add(1, Ordering::SeqCst);
+                if self.apply_fail.load(Ordering::SeqCst) {
+                    return Err(Failure::Unavailable);
+                }
+                let failure = self.helper_failure.load(Ordering::SeqCst);
+                if failure != 0 {
+                    let mut value = json!({"error":"fixture_secret_helper_response","configured":true,"running":true,"endpoint":"https://storage.example.test"});
+                    if failure == 1 {
+                        value["stage"] = json!("verified engine installation");
+                    } else if failure == 3 {
+                        value["stage"] = json!("fixture_secret_untrusted_stage");
+                    }
+                    return Ok(value);
+                }
                 Ok(
                     json!({"configured":true,"running":true,"endpoint":"https://storage.example.test"}),
                 )
@@ -596,11 +696,108 @@ mod tests {
                 .await
                 .expect_err("fail");
             assert!(!error.contains("fixture_secret"));
+            assert_eq!(
+                error,
+                format!(
+                    "{} Perpanjangan otomatis dijeda.",
+                    if wrong_name {
+                        "Sertifikat storage tidak valid untuk domain dan private key yang diminta. Layanan storage belum diubah."
+                    } else {
+                        ISSUANCE_FAILED
+                    }
+                )
+            );
             assert_eq!(runtime.applied.load(Ordering::SeqCst), 0);
             let row = binding(&pool).await.expect("binding");
             assert_eq!(row.state, "failed");
             assert!(!row.auto_renew);
+            assert_eq!(row.error.as_deref(), Some(error.as_str()));
             assert!(!public(&row).to_string().contains("fixture_secret"));
+        }
+    }
+    #[test]
+    fn issuance_diagnostics_only_accept_exact_approved_messages() {
+        let propagation = crate::dns01::TXT_PROPAGATION_ERROR;
+        assert!(issuance_failure(propagation).contains("kedua resolver publik"));
+        for unsafe_error in [
+            "fixture_secret_must_not_persist".to_owned(),
+            format!("{propagation} fixture_secret_must_not_persist"),
+            format!("fixture_secret_must_not_persist: {propagation}"),
+            format!("{propagation}\nAuthorization: Bearer fixture_secret"),
+            "-----BEGIN PRIVATE KEY-----\nfixture_secret".to_owned(),
+        ] {
+            assert_eq!(issuance_failure(&unsafe_error), ISSUANCE_FAILED);
+        }
+        for approved in [
+            crate::dns01::DNS_AGENT_STATUS_ERROR,
+            crate::dns01::TXT_PRESENT_ERROR,
+            "Akun ACME DNS-01 tidak tersedia.",
+            "CA menolak order DNS.",
+            "Validasi DNS-01 gagal di CA.",
+            "Finalisasi DNS gagal.",
+            "Batas waktu order DNS-01 habis.",
+            "Token DNS berubah; buat order baru.",
+            "Cleanup TXT belum selesai; jurnal dipertahankan. Bersihkan sebelum order berikutnya. Sertifikat aktif dipertahankan.",
+        ] {
+            assert_ne!(issuance_failure(approved), ISSUANCE_FAILED);
+        }
+    }
+    #[tokio::test]
+    async fn propagation_and_deployment_failures_keep_safe_stage_in_job_error_and_status() {
+        for fail_apply in [false, true] {
+            let (pool, runtime, services, job, payload) = fixture().await;
+            runtime
+                .propagation_fail
+                .store(!fail_apply, Ordering::SeqCst);
+            runtime.apply_fail.store(fail_apply, Ordering::SeqCst);
+            let error = process(&pool, &services, &job, &payload)
+                .await
+                .expect_err("failure");
+            assert!(error.contains(if fail_apply {
+                "Pemasangan sertifikat storage gagal"
+            } else {
+                "kedua resolver publik"
+            }));
+            let row = binding(&pool).await.expect("binding");
+            assert_eq!(row.state, "failed");
+            assert!(!row.auto_renew);
+            assert_eq!(row.error.as_deref(), Some(error.as_str()));
+            assert_eq!(public(&row)["error"].as_str(), Some(error.as_str()));
+            assert_eq!(
+                runtime.applied.load(Ordering::SeqCst),
+                usize::from(fail_apply)
+            );
+            assert!(process(&pool, &services, &job, &payload).await.is_err());
+            assert_eq!(runtime.issued.load(Ordering::SeqCst), 1);
+            assert!(
+                !public(&binding(&pool).await.expect("binding"))
+                    .to_string()
+                    .contains("fixture_secret")
+            );
+        }
+    }
+    #[tokio::test]
+    async fn helper_error_json_is_not_a_healthy_listener_and_never_persists_raw_details() {
+        for mode in [1, 2, 3] {
+            let (pool, runtime, services, job, payload) = fixture().await;
+            runtime.helper_failure.store(mode, Ordering::SeqCst);
+            let error = process(&pool, &services, &job, &payload)
+                .await
+                .expect_err("helper failure");
+            assert!(error.contains(if mode == 1 {
+                "pemasangan engine SeaweedFS gagal"
+            } else {
+                "Pemasangan layanan storage gagal setelah sertifikat diterbitkan"
+            }));
+            assert!(!error.contains("fixture_secret"));
+            let row = binding(&pool).await.expect("binding");
+            assert_eq!(row.state, "failed");
+            assert!(!row.auto_renew);
+            assert_eq!(row.error.as_deref(), Some(error.as_str()));
+            assert_eq!(runtime.issued.load(Ordering::SeqCst), 1);
+            assert_eq!(runtime.applied.load(Ordering::SeqCst), 1);
+            assert!(process(&pool, &services, &job, &payload).await.is_err());
+            assert_eq!(runtime.issued.load(Ordering::SeqCst), 1);
         }
     }
     #[tokio::test]

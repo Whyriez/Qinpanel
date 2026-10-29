@@ -81,8 +81,10 @@ class StorageTlsMigration(unittest.TestCase):
     def test_failed_issuance_pauses_renewal_instead_of_repeating_ca_orders(self):
         self.enroll()
         self.db.execute(CLAIM,(101,2))
-        self.assertEqual(self.db.execute(FAIL,(102,2)).rowcount,1)
+        message = "Validasi DNS-01 melewati batas tunggu; periksa resolver publik."
+        self.assertEqual(self.db.execute(FAIL,(102,message,2)).rowcount,1)
         self.assertEqual(self.db.execute("SELECT state,auto_renew FROM managed_storage_tls").fetchone(),("failed",0))
+        self.assertEqual(self.db.execute("SELECT error FROM managed_storage_tls").fetchone()[0],message)
         self.assertEqual(self.db.execute(RENEW,("retry","retry-job",4000,4000,2)).rowcount,0)
 
     def test_constraints_reject_unknown_states_and_invalid_flags(self):

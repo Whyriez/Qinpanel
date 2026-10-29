@@ -25,6 +25,10 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use utoipa::ToSchema;
 type Error = (StatusCode, Json<Value>);
+pub(crate) const TXT_PROPAGATION_ERROR: &str =
+    "TXT belum terlihat pada dua resolver publik. Periksa delegasi/propagasi lalu coba lagi.";
+pub(crate) const DNS_AGENT_STATUS_ERROR: &str = "Status DNS-01 agent tidak dapat dibaca.";
+pub(crate) const TXT_PRESENT_ERROR: &str = "Agent gagal menyiapkan TXT DNS-01 di Cloudflare.";
 fn problem(status: StatusCode, message: impl Into<String>) -> Error {
     (status, Json(json!({"error":message.into()})))
 }
@@ -823,7 +827,10 @@ async fn issue_dns_names(
     };
     let mut cleanup_ids = Vec::new();
     let flow = async {
-        let status = agent.dns01(Dns01Request::Status).await.map_err(err)?;
+        let status = agent
+            .dns01(Dns01Request::Status)
+            .await
+            .map_err(|_| DNS_AGENT_STATUS_ERROR.to_owned())?;
         if status["revision"] != revision {
             return Err("Token DNS berubah; buat order baru.".to_owned());
         }
@@ -876,7 +883,7 @@ async fn issue_dns_names(
                         digest: digest.clone(),
                     })
                     .await
-                    .map_err(err)?;
+                    .map_err(|_| TXT_PRESENT_ERROR.to_owned())?;
                 propagation(&host, &digest).await?;
                 challenge
                     .set_ready()
@@ -1054,10 +1061,7 @@ async fn propagation_with(
         }
     })
     .await
-    .map_err(|_| {
-        "TXT belum terlihat pada dua resolver publik. Periksa delegasi/propagasi lalu coba lagi."
-            .into()
-    })
+    .map_err(|_| TXT_PROPAGATION_ERROR.into())
 }
 pub async fn schedule(s: &AppState) {
     let pending:Vec<(String,String,Option<i64>,String)>=sqlx::query_as("SELECT id,job_id,actor_id,state FROM dns01_orders WHERE state IN ('queued','issuing','candidate')").fetch_all(&s.pool).await.unwrap_or_default();

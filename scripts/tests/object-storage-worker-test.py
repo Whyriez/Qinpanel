@@ -342,6 +342,8 @@ class WorkerTests(unittest.TestCase):
                     self.assertNotIn(self.controller.state()["root"]["secret_key"], message)
 
     def test_diagnostics_accept_only_machine_state_not_commands_credentials_or_paths(self):
+        self.assertEqual(worker.error_response(worker.StorageSetupError("safe", "PRIVATE_STAGE")), {"error": "safe"})
+        self.assertEqual(worker.error_response(worker.StorageError("safe")), {"error": "safe"})
         raw = b"LoadState=loaded\nActiveState=failed\nResult=exit-code\nExecMainStatus=1\nExecStart=SECRET_COMMAND\nEnvironment=SECRET_KEY\nSubState=PRIVATE VALUE\n"
         with patch.object(worker, "command", return_value=raw):
             message = worker.service_status_summary(worker.UNIT)
@@ -350,6 +352,22 @@ class WorkerTests(unittest.TestCase):
             self.assertNotIn(secret, message)
         with patch.object(worker, "command", side_effect=RuntimeError("PRIVATE")):
             self.assertEqual(worker.service_status_summary(worker.UNIT), "unavailable")
+
+    def test_engine_install_failure_reports_stage_and_preserves_existing_state(self):
+        before = {path: path.read_bytes() for path in (self.controller.state_path, self.controller.config / "s3.json")}
+        request = {"hostname": self.state["hostname"], "fullchain_pem": "fixture-chain", "private_key_pem": "fixture-key"}
+        with patch.object(worker, "safe_directory"), patch.object(worker.ssl, "SSLContext"), patch.object(worker, "install_engine", side_effect=worker.StorageError("Engine download exceeded its size or time limit.")):
+            with self.assertRaises(worker.StorageSetupError) as failure:
+                self.controller.configure(request)
+        response = worker.error_response(failure.exception)
+        self.assertEqual(response["stage"], "verified engine installation")
+        self.assertIn("Configuration was restored", response["error"])
+        self.assertNotIn("fixture-key", json.dumps(response))
+        self.assertNotIn(self.state["root"]["secret_key"], json.dumps(response))
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse(self.controller.unit.exists())
+        self.assertNotIn(unittest.mock.call(["systemctl", "enable", "--now", worker.UNIT], 130), worker.command.call_args_list)
 
     def test_command_failure_and_timeout_never_return_raw_output_or_argv(self):
         args = ["nginx", "-t", "PRIVATE_ARG"]
