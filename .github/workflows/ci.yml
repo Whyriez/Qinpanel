@@ -62,6 +62,7 @@ jobs:
         run: |
           python3 scripts/tests/object-storage-worker-test.py
           python3 scripts/tests/managed-storage-migration-test.py
+          python3 scripts/tests/storage-policy-migration-test.py
           python3 scripts/tests/storage-tls-migration-test.py
 
       - name: Ensure web dist directory exists

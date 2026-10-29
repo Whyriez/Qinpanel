@@ -332,7 +332,7 @@ pub(super) async fn panel(state: &AppState, headers: &HeaderMap) -> Result<Stora
         port: origin.port,
     })
 }
-async fn run(
+pub(super) async fn run(
     state: &AppState,
     services: &Services,
     headers: &HeaderMap,
@@ -361,7 +361,8 @@ pub async fn test(
     value: Result<Json<StorageConfirmation>, JsonRejection>,
 ) -> Result<Response, Error> {
     let value = input(value)?;
-    let connection = store::load(&state, &actor, &id).await?;
+    let connection = store::load_content(&state, &actor, &id).await?;
+    super::policy::authorize(&state.pool, &id, "read").await?;
     ensure_revision(&connection, value.expected_revision)?;
     run(
         &state,
@@ -402,7 +403,8 @@ pub async fn objects(
             "Prefix atau token tidak valid.",
         ));
     }
-    let connection = store::load(&state, &actor, &id).await?;
+    let connection = store::load_content(&state, &actor, &id).await?;
+    super::policy::authorize(&state.pool, &id, "read").await?;
     let outcome = run(
         &state,
         &services,
@@ -434,6 +436,14 @@ async fn mutate(
     let keys = credentials(services, connection).await?;
     let origin = panel(state, headers).await?;
     let id = store::reserve(&state.pool, connection, actor.id, action).await?;
+    if let Operation::Upload { key, body, .. } = &operation
+        && let Err(error) =
+            super::policy::admit_upload(state, services, headers, connection, key, body.len()).await
+    {
+        store::finish(&state.pool, &id, &Err(Failure::Provider(413))).await?;
+        return Err(error);
+    }
+
     let result = services
         .runtime
         .execute(connection.clone(), keys, operation, origin)
@@ -477,7 +487,8 @@ pub async fn upload(
             "Transfer lain masih berjalan. Coba lagi nanti.",
         )
     })?;
-    let connection = store::load(&state, &actor, &id).await?;
+    let connection = store::load_content(&state, &actor, &id).await?;
+    super::policy::authorize(&state.pool, &id, "write").await?;
     ensure_revision(&connection, query.expected_revision)?;
     require_verified(&connection)?;
     if !query.overwrite && !connection.conditional_put() {
@@ -515,7 +526,8 @@ pub async fn delete_object(
     value: Result<Json<StorageObjectInput>, JsonRejection>,
 ) -> Result<Response, Error> {
     let value = input(value)?;
-    let connection = store::load(&state, &actor, &id).await?;
+    let connection = store::load_content(&state, &actor, &id).await?;
+    super::policy::authorize(&state.pool, &id, "delete").await?;
     ensure_revision(&connection, value.expected_revision)?;
     require_verified(&connection)?;
     if value.confirmation.as_deref() != Some(&value.key) {
@@ -548,13 +560,14 @@ pub async fn download(
     value: Result<Json<StorageObjectInput>, JsonRejection>,
 ) -> Result<Response, Error> {
     let value = input(value)?;
-    let connection = store::load(&state, &actor, &id).await?;
+    let connection = store::load_content(&state, &actor, &id).await?;
+    super::policy::authorize(&state.pool, &id, "read").await?;
     ensure_revision(&connection, value.expected_revision)?;
     require_verified(&connection)?;
     super::domain::key(&value.key)
         .map_err(|_| bad(StatusCode::BAD_REQUEST, "Object key tidak valid."))?;
     let keys = credentials(&services, &connection).await?;
-    if keys.session_token.is_some() {
+    if connection.managed || keys.session_token.is_some() {
         let expires_at = chrono::Utc::now().timestamp() + 60;
         let query = super::signing::query(&[
             ("key".into(), value.key),
@@ -707,6 +720,8 @@ pub async fn disconnect(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadQuery {
+    #[serde(default)]
+    pub preview: bool,
     pub expected_revision: i64,
     pub key: String,
     pub expires_at: i64,
@@ -751,7 +766,8 @@ pub async fn download_proxy(
             "Tautan download kedaluwarsa. Minta tautan baru.",
         ));
     }
-    let connection = store::load(&state, &actor, &id).await?;
+    let connection = store::load_content(&state, &actor, &id).await?;
+    super::policy::authorize(&state.pool, &id, "read").await?;
     ensure_revision(&connection, query.expected_revision)?;
     super::domain::key(&query.key)
         .map_err(|_| bad(StatusCode::BAD_REQUEST, "Object key tidak valid."))?;
@@ -782,8 +798,23 @@ pub async fn download_proxy(
         .next()
         .filter(|v| !v.is_empty())
         .unwrap_or("download");
+    let content_type = if query.preview {
+        preview_type(&bytes).ok_or_else(|| {
+            bad(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Preview hanya mendukung PNG, JPEG, GIF dan WebP hingga 8 MiB.",
+            )
+        })?
+    } else {
+        "application/octet-stream"
+    };
+    let disposition_type = if query.preview {
+        "inline"
+    } else {
+        "attachment"
+    };
     let disposition = format!(
-        "attachment; filename*=UTF-8''{}",
+        "{disposition_type}; filename*=UTF-8''{}",
         super::signing::encode(name, false)
     );
     let length = bytes.len();
@@ -794,7 +825,7 @@ pub async fn download_proxy(
     });
     let mut response = Response::new(body);
     for (name, value) in [
-        ("content-type", "application/octet-stream".to_owned()),
+        ("content-type", content_type.to_owned()),
         ("content-disposition", disposition),
         ("content-length", length.to_string()),
         ("cache-control", "no-store".to_owned()),
@@ -810,4 +841,23 @@ pub async fn download_proxy(
         );
     }
     Ok(response)
+}
+
+fn preview_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() > 8 * 1024 * 1024 {
+        return None;
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return Some("image/webp");
+    }
+    None
 }

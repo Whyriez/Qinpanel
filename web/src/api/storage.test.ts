@@ -1,9 +1,40 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from './client';
-import { storageAllocationId, fetchStorageTls, generateStorageTls, configureManagedStorage, allocateManagedBucket, issueStorageKey, deleteStorageObject, projectStorageEnvironment, safeDownload, saveStorageConnection, uploadStorageObject, validObjectKey, type StorageConnection } from './storage';
+import { storageAllocationId, fetchStorageTls, generateStorageTls, configureManagedStorage, allocateManagedBucket, issueStorageKey, deleteStorageObject, projectStorageEnvironment, safeDownload, saveStorageConnection, uploadStorageObject, validObjectKey, previewStorageObject, saveStorageRules, saveStorageAllocation, measureStorageUsage, type StoragePolicy, type StorageConnection } from './storage';
 const connection: StorageConnection = { id: 'fixture-connection', owner_id: 2, site_id: 1, label: 'Project media', provider: 'compatible', endpoint: 'https://objects.example.test', region: 'us-east-1', addressing: 'path', bucket: 'project-media', revision: 4, verified_at: 1, has_credentials: true, created_at: 1, updated_at: 1 };
 afterEach(() => { vi.unstubAllGlobals(); setCsrfToken(null); });
 describe('S3 client contracts', () => {
+  it('fetches private previews only through the authenticated same-origin proxy', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(new Uint8Array([137, 80, 78, 71]), { headers: { 'Content-Type': 'image/png' } })); vi.stubGlobal('fetch', fetch);
+    const signal = new AbortController().signal;
+    expect((await previewStorageObject(connection, 'photos/a + café.png', signal)).type).toBe('image/png');
+    const [url, options] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/^\/api\/v1\/storage\/connections\/fixture-connection\/download\?/);
+    const query = new URL(url, 'https://panel.invalid').searchParams;
+    expect(query.get('key')).toBe('photos/a + café.png'); expect(query.get('preview')).toBe('true');
+    expect(options).toMatchObject({ credentials: 'include', cache: 'no-store', redirect: 'error', signal });
+  });
+  it('rejects active preview types, oversized previews and server authorization errors', async () => {
+    const signal = new AbortController().signal;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<svg/>', { headers: { 'Content-Type': 'image/svg+xml' } })));
+    await expect(previewStorageObject(connection, 'file.svg', signal)).rejects.toThrow('Unsupported preview');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array(8 * 1048576 + 1), { headers: { 'Content-Type': 'image/png' } })));
+    await expect(previewStorageObject(connection, 'file.png', signal)).rejects.toThrow('8 MiB');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ error: 'Owner session required' }, { status: 403 })));
+    await expect(previewStorageObject(connection, 'file.png', signal)).rejects.toThrow('Owner session required');
+  });
+  it('binds rules and allocation updates to policy revisions without submitting object paths', async () => {
+    const policy = { revision: 7, rules: { read: true, write: false, delete: false, max_file_bytes: 1048576, extensions: ['png'] } } as StoragePolicy;
+    const fetch = vi.fn().mockImplementation(async () => Response.json(policy)); vi.stubGlobal('fetch', fetch); setCsrfToken('fixture-csrf');
+    await saveStorageRules(connection.id, policy, policy.rules);
+    await saveStorageAllocation(connection.id, policy, 1073741824);
+    await measureStorageUsage(connection.id);
+    const calls = fetch.mock.calls as unknown as [string, RequestInit][];
+    expect(JSON.parse(String(calls[0][1].body))).toEqual({ expected_revision: 7, rules: policy.rules });
+    expect(JSON.parse(String(calls[1][1].body))).toEqual({ expected_revision: 7, quota_bytes: 1073741824 });
+    expect(calls[2][0]).toContain('/usage');
+    for (const [, options] of calls) expect(new Headers(options.headers).get('X-CSRF-Token')).toBe('fixture-csrf');
+  });
   it('keeps unavailable DNS status distinct and accepts legacy inventory responses', async () => {
     for (const dns of [{ configured: false, zone_name: null }, { available: false, configured: false, zone_name: null }, { available: true, configured: true, zone_name: 'example.test' }]) {
       const value = { certificate: { revision: 1, state: 'idle', auto_renew: false }, dns };

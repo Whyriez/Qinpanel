@@ -13,7 +13,7 @@ describe('Managed storage', () => {
   it('opens the first bucket flow for an active service without silently requiring an owner list', () => {
     expect(bucketButton(actions())).toContain('button-primary');
     expect(bucketButton(actions())).not.toContain('disabled');
-    expect(actions()).toContain('Kelola bucket &amp; file');
+    expect(actions()).toContain('Kelola alokasi bucket');
   });
   it('still blocks allocation while the service is unavailable, loading, locked or another dialog is open', () => {
     for (const props of [{ status: null }, { status: { ...status, running: false } }, { loading: true }, { disabled: true }, { modalOpen: true }]) {

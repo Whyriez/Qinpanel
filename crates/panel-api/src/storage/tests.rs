@@ -18,6 +18,418 @@ fn keys() -> S3Credentials {
 }
 
 #[tokio::test]
+async fn administrator_and_impersonated_sessions_cannot_access_owner_content() {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    let expires = chrono::Utc::now().timestamp() + 60;
+    for actor in ["admin", "alice"] {
+        if actor == "alice" {
+            sqlx::query(
+                "UPDATE sessions SET user_agent='impersonated_by:admin' WHERE id='session-alice'",
+            )
+            .execute(&ctx.pool)
+            .await
+            .expect("impersonation fixture");
+        }
+        for (method, suffix, body) in [
+            ("GET", "objects".to_string(), json!({})),
+            ("POST", "test".to_string(), json!({"expected_revision":1})),
+            (
+                "POST",
+                "upload?expected_revision=1&key=private.txt&overwrite=true".to_string(),
+                json!("file"),
+            ),
+            (
+                "POST",
+                "delete".to_string(),
+                json!({"expected_revision":1,"key":"private.txt","confirmation":"private.txt"}),
+            ),
+            (
+                "POST",
+                "download".to_string(),
+                json!({"expected_revision":1,"key":"private.txt"}),
+            ),
+            (
+                "GET",
+                format!(
+                    "download?expected_revision=1&key=private.txt&expires_at={expires}&preview=true"
+                ),
+                json!({}),
+            ),
+            (
+                "POST",
+                "application-key".to_string(),
+                json!({"expected_revision":1,"expected_generation":0,"confirmation":"project-media","retry":false}),
+            ),
+            (
+                "POST",
+                "policy".to_string(),
+                json!({"expected_revision":1,"rules":policy::Rules::default()}),
+            ),
+        ] {
+            let (status, body) = ctx
+                .call(
+                    method,
+                    &format!("/api/v1/storage/connections/{id}/{suffix}"),
+                    Some(actor),
+                    true,
+                    body,
+                )
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{actor} {suffix}: {body}");
+        }
+    }
+    assert!(ctx.runtime.calls.lock().expect("calls").is_empty());
+}
+
+#[tokio::test]
+async fn storage_rules_are_owner_scoped_revision_bound_and_default_private() {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    let path = format!("/api/v1/storage/connections/{id}/policy");
+    let (status, default) = ctx
+        .call("GET", &path, Some("alice"), false, json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(default["visibility"], "owner");
+    assert_eq!(default["enforcement"], "panel");
+    assert!(default["used_bytes"].is_null());
+    assert_eq!(
+        ctx.call("GET", &path, Some("bob"), false, json!({}))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let rules = policy::Rules {
+        read: false,
+        delete: false,
+        ..policy::Rules::default()
+    };
+    let input = json!({"expected_revision":1,"rules":rules});
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), false, input.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, input.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, input).await.0,
+        StatusCode::CONFLICT
+    );
+    for (method, suffix, body) in [
+        ("GET", "objects", json!({})),
+        (
+            "POST",
+            "download",
+            json!({"expected_revision":1,"key":"private.txt"}),
+        ),
+        (
+            "POST",
+            "delete",
+            json!({"expected_revision":1,"key":"private.txt","confirmation":"private.txt"}),
+        ),
+    ] {
+        assert_eq!(
+            ctx.call(
+                method,
+                &format!("/api/v1/storage/connections/{id}/{suffix}"),
+                Some("alice"),
+                true,
+                body
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    // An owner can undo their own deny rule without exposing content to anyone else.
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &path,
+            Some("alice"),
+            true,
+            json!({"expected_revision":2,"rules":policy::Rules::default()})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(ctx.runtime.calls.lock().expect("calls").is_empty());
+}
+
+#[tokio::test]
+async fn admin_usage_response_contains_totals_without_object_names_and_preserves_last_measurement_on_failure()
+ {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    let path = format!("/api/v1/storage/connections/{id}/usage");
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, json!({}))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, body) = ctx
+        .call("POST", &path, Some("admin"), true, json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["used_bytes"], 3);
+    assert_eq!(body["object_count"], 1);
+    assert!(!body.to_string().contains("sample.txt"));
+    ctx.runtime.fail.store(403, Ordering::SeqCst);
+    assert_eq!(
+        ctx.call("POST", &path, Some("admin"), true, json!({}))
+            .await
+            .0,
+        StatusCode::BAD_GATEWAY
+    );
+    let (_, current) = ctx
+        .call(
+            "GET",
+            &format!("/api/v1/storage/connections/{id}/policy"),
+            Some("admin"),
+            false,
+            json!({}),
+        )
+        .await;
+    assert_eq!(current["used_bytes"], 3);
+    assert_eq!(current["measured_at"], body["measured_at"]);
+}
+
+#[tokio::test]
+async fn usage_traverses_folders_and_continuation_pages_without_exposing_paths() {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    ctx.runtime.paged.store(true, Ordering::SeqCst);
+    let (status, body) = ctx
+        .call(
+            "POST",
+            &format!("/api/v1/storage/connections/{id}/usage"),
+            Some("admin"),
+            true,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["used_bytes"], 13);
+    assert_eq!(body["object_count"], 3);
+    assert!(!body.to_string().contains("private/"));
+    assert_eq!(
+        ctx.runtime
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .filter(|call| **call == "list")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn panel_upload_limits_use_fresh_usage_and_block_provider_mutation() {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    ctx.verify(&id).await;
+    let allocation = format!("/api/v1/storage/connections/{id}/allocation");
+    let policy = format!("/api/v1/storage/connections/{id}/policy");
+    let upload = format!(
+        "/api/v1/storage/connections/{id}/upload?expected_revision=1&key=photo.png&overwrite=true"
+    );
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &allocation,
+            Some("alice"),
+            true,
+            json!({"expected_revision":1,"quota_bytes":4})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &allocation,
+            Some("admin"),
+            true,
+            json!({"expected_revision":1,"quota_bytes":4})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        ctx.call("POST", &upload, Some("alice"), true, json!("file"))
+            .await
+            .0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert!(!ctx.runtime.calls.lock().expect("calls").contains(&"upload"));
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &allocation,
+            Some("admin"),
+            true,
+            json!({"expected_revision":2,"quota_bytes":100})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        ctx.call("POST", &upload, Some("alice"), true, json!("file"))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let mut rules = policy::Rules {
+        extensions: vec!["jpg".into()],
+        ..policy::Rules::default()
+    };
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &policy,
+            Some("alice"),
+            true,
+            json!({"expected_revision":3,"rules":rules})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        ctx.call("POST", &upload, Some("alice"), true, json!("file"))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    rules.extensions.clear();
+    rules.max_file_bytes = 2;
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &policy,
+            Some("alice"),
+            true,
+            json!({"expected_revision":4,"rules":rules})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        ctx.call("POST", &upload, Some("alice"), true, json!("file"))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        ctx.runtime
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .filter(|value| **value == "upload")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn managed_downloads_use_owner_proxy_without_public_s3_presigning() {
+    let ctx = Context::new().await;
+    let (_, connection) = ctx
+        .call(
+            "POST",
+            "/api/v1/storage/managed/buckets",
+            Some("admin"),
+            true,
+            managed_allocation(),
+        )
+        .await;
+    let id = connection["id"].as_str().expect("id");
+    ctx.verify(id).await;
+    let (status, body) = ctx
+        .call(
+            "POST",
+            &format!("/api/v1/storage/connections/{id}/download"),
+            Some("alice"),
+            true,
+            json!({"expected_revision":1,"key":"photo.png"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["url"]
+            .as_str()
+            .expect("url")
+            .starts_with("/api/v1/storage/")
+    );
+    assert!(
+        !ctx.runtime
+            .calls
+            .lock()
+            .expect("calls")
+            .contains(&"download")
+    );
+}
+
+#[tokio::test]
+async fn raster_preview_is_sniffed_and_active_documents_are_rejected() {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    let expires = chrono::Utc::now().timestamp() + 60;
+    let base = format!(
+        "/api/v1/storage/connections/{id}/download?expected_revision=1&expires_at={expires}&preview=true&key="
+    );
+    let response = ctx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{base}fixture.png"))
+                .header("host", "panel.example.test")
+                .header("cookie", format!("{SESSION_COOKIE_NAME}=token-alice"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert!(
+        response.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .expect("disposition")
+            .starts_with("inline;")
+    );
+    assert_eq!(
+        ctx.call(
+            "GET",
+            &format!("{base}document.svg"),
+            Some("alice"),
+            false,
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+}
+
+#[tokio::test]
 async fn storage_tls_inventory_distinguishes_dns_agent_failure_from_missing_token() {
     let ctx = Context::new().await;
     for (configured, failed) in [(false, false), (true, false), (true, true)] {
@@ -219,6 +631,7 @@ struct Fake {
     dns_configured: AtomicBool,
     dns_fail: AtomicBool,
     configure_calls: AtomicUsize,
+    paged: AtomicBool,
 }
 impl StorageRuntime for Fake {
     fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
@@ -308,6 +721,22 @@ impl StorageRuntime for Fake {
                 status => return Err(Failure::Provider(status)),
             }
             Ok(match operation {
+                Operation::List { prefix, token } if self.paged.load(Ordering::SeqCst) => {
+                    let first = prefix.is_empty() && token.is_none();
+                    Outcome::Listing(Listing {
+                        objects: vec![Object {
+                            key: format!("{prefix}{}.txt", token.as_deref().unwrap_or("private")),
+                            size: if prefix.is_empty() { 3 } else { 7 },
+                            modified_at: "2026-10-29T00:00:00Z".into(),
+                        }],
+                        prefixes: if first {
+                            vec!["private/".into()]
+                        } else {
+                            vec![]
+                        },
+                        next_token: first.then(|| "next".into()),
+                    })
+                }
                 Operation::List { prefix, .. } => Outcome::Listing(Listing {
                     objects: vec![Object {
                         key: format!("{prefix}sample.txt"),
@@ -321,8 +750,12 @@ impl StorageRuntime for Fake {
                     url: signing::download(&connection, &keys(), &key, chrono::Utc::now())?,
                     expires_at: chrono::Utc::now().timestamp() + 60,
                 },
-                Operation::ReadObject { .. } => {
-                    Outcome::Content(axum::body::Bytes::from_static(b"fixture file"))
+                Operation::ReadObject { key } => {
+                    Outcome::Content(if key.ends_with("fixture.png") {
+                        axum::body::Bytes::from_static(b"\x89PNG\r\n\x1a\nfixture")
+                    } else {
+                        axum::body::Bytes::from_static(b"fixture file")
+                    })
                 }
                 _ => Outcome::Done,
             })
@@ -1253,7 +1686,7 @@ async fn managed_unknown_provision_is_durable_and_reconciles_the_same_allocation
 }
 
 #[tokio::test]
-async fn application_key_is_admin_only_generation_bound_and_never_returned_by_get() {
+async fn application_key_is_owner_only_generation_bound_and_never_returned_by_get() {
     let ctx = Context::new().await;
     let (_, connection) = ctx
         .call(
@@ -1270,19 +1703,19 @@ async fn application_key_is_admin_only_generation_bound_and_never_returned_by_ge
     );
     let input = json!({"expected_revision":1,"expected_generation":0,"confirmation":"alice-media","retry":false});
     assert_eq!(
-        ctx.call("POST", &path, Some("alice"), true, input.clone())
+        ctx.call("POST", &path, Some("admin"), true, input.clone())
             .await
             .0,
         StatusCode::FORBIDDEN
     );
     let result = ctx
-        .call("POST", &path, Some("admin"), true, input.clone())
+        .call("POST", &path, Some("alice"), true, input.clone())
         .await;
     assert_eq!(result.0, StatusCode::OK, "{}", result.1);
     assert_eq!(result.1["generation"], 1);
     assert!(result.1["credentials"]["secret_key"].is_string());
     assert_eq!(
-        ctx.call("POST", &path, Some("admin"), true, input).await.0,
+        ctx.call("POST", &path, Some("alice"), true, input).await.0,
         StatusCode::CONFLICT
     );
     let listing = ctx

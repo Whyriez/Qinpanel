@@ -2,6 +2,25 @@ use super::*;
 use crate::{auth::AuthenticatedUser, tenant_context::resolve_tenant_context};
 use panel_db::DbPool;
 
+pub fn require_owner_session(actor: &AuthenticatedUser) -> Result<(), Error> {
+    if actor.role != "user" || actor.impersonated_by.is_some() {
+        return Err(bad(
+            StatusCode::FORBIDDEN,
+            "Isi bucket hanya dapat diakses tenant pemilik melalui sesi sendiri. Administrator hanya mengelola alokasi dan pemakaian.",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn load_content(
+    state: &AppState,
+    actor: &AuthenticatedUser,
+    id: &str,
+) -> Result<Connection, Error> {
+    require_owner_session(actor)?;
+    load(state, actor, id).await
+}
+
 pub async fn load(
     state: &AppState,
     actor: &AuthenticatedUser,

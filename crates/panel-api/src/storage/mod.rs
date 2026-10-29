@@ -2,6 +2,7 @@
 pub mod domain;
 pub(crate) mod handlers;
 pub(crate) mod managed;
+pub(crate) mod policy;
 mod signing;
 mod store;
 pub(crate) mod tls;
@@ -190,6 +191,18 @@ pub fn router(agent: Arc<AgentClient>) -> Router<AppState> {
 pub fn router_with_runtime(runtime: Arc<dyn StorageRuntime>) -> Router<AppState> {
     Router::new()
         .route("/api/v1/storage/context", get(handlers::context))
+        .route(
+            "/api/v1/storage/connections/{id}/policy",
+            get(policy::overview).post(policy::rules),
+        )
+        .route(
+            "/api/v1/storage/connections/{id}/allocation",
+            post(policy::allocation),
+        )
+        .route(
+            "/api/v1/storage/connections/{id}/usage",
+            post(policy::usage),
+        )
         .route(
             "/api/v1/storage/managed",
             get(managed::status).post(managed::configure),

@@ -1,6 +1,6 @@
 //! Managed S3 allocation. The agent owns lifecycle; the API owns tenant authority.
 use super::*;
-use crate::auth::{AuthenticatedUser, RequireAdminCsrf, RequireAuth};
+use crate::auth::{AuthenticatedUser, RequireAdminCsrf, RequireAuth, RequireCsrf};
 use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::HeaderMap,
@@ -377,12 +377,12 @@ async fn reserve_key(
 pub async fn application_key(
     State(state): State<AppState>,
     Extension(services): Extension<Services>,
-    RequireAdminCsrf(actor): RequireAdminCsrf,
+    RequireCsrf(actor): RequireCsrf,
     Path(id): Path<String>,
     value: Result<Json<ManagedStorageKeyInput>, JsonRejection>,
 ) -> Result<Response, Error> {
     let input = handlers::input(value)?;
-    let connection = store::load(&state, &actor, &id).await?;
+    let connection = store::load_content(&state, &actor, &id).await?;
     require_managed(&connection)?;
     handlers::ensure_revision(&connection, input.expected_revision)?;
     if input.confirmation != connection.bucket

@@ -21,8 +21,28 @@ export interface ConnectionInput {
 }
 export interface StorageObject { key: string; size: number; modified_at: string }
 export interface StorageListing { objects: StorageObject[]; prefixes: string[]; next_token: string | null }
+export interface StorageRules { read: boolean; write: boolean; delete: boolean; max_file_bytes: number; extensions: string[] }
+export interface StoragePolicy {
+  revision: number; quota_bytes: number | null; used_bytes: number | null; object_count: number | null;
+  measured_at: number | null; rules: StorageRules; enforcement: 'panel'; visibility: 'owner';
+}
 const root = '/api/v1/storage';
 const path = (id: string) => `${root}/connections/${encodeURIComponent(id)}`;
+export const fetchStoragePolicy = (id: string, signal?: AbortSignal) => request<StoragePolicy>(`${path(id)}/policy`, { signal });
+export const saveStorageRules = (id: string, policy: StoragePolicy, rules: StorageRules) => request<StoragePolicy>(`${path(id)}/policy`, { method: 'POST', body: JSON.stringify({ expected_revision: policy.revision, rules }) });
+export const saveStorageAllocation = (id: string, policy: StoragePolicy, quota_bytes: number | null) => request<StoragePolicy>(`${path(id)}/allocation`, { method: 'POST', body: JSON.stringify({ expected_revision: policy.revision, quota_bytes }) });
+export const measureStorageUsage = (id: string) => request<StoragePolicy>(`${path(id)}/usage`, { method: 'POST' });
+export async function previewStorageObject(connection: StorageConnection, key: string, signal: AbortSignal): Promise<Blob> {
+  if (!validObjectKey(key)) throw new Error('Invalid object key');
+  const query = new URLSearchParams({ expected_revision: String(connection.revision), key, expires_at: String(Math.floor(Date.now() / 1000) + 60), preview: 'true' });
+  const response = await fetch(`${path(connection.id)}/download?${query}`, { credentials: 'include', cache: 'no-store', redirect: 'error', signal });
+  if (!response.ok) throw new Error(errorMessage(await response.json().catch(() => null), 'Preview unavailable'));
+  const type = response.headers.get('Content-Type')?.split(';')[0];
+  if (!type || !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(type)) throw new Error('Unsupported preview');
+  const blob = await response.blob();
+  if (blob.size > 8 * 1024 * 1024) throw new Error('Preview exceeds 8 MiB');
+  return blob;
+}
 export const fetchStorageContext = (signal?: AbortSignal) => request<StorageContext>(`${root}/context`, { signal });
 export const fetchStorageConnections = (site?: number, signal?: AbortSignal) => request<{ connections: StorageConnection[]; upload_limit_bytes: number }>(`${root}/connections${site ? `?site_id=${site}` : ''}`, { signal });
 export const saveStorageConnection = (value: ConnectionInput, id?: string) => request<StorageConnection>(id ? path(id) : `${root}/connections`, { method: 'POST', body: JSON.stringify(value) });
