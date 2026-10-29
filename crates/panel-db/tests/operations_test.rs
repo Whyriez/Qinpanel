@@ -222,6 +222,11 @@ async fn restored_rollback_journal_snapshot_reopens_with_operational_pools() {
         .await
         .unwrap();
     assert_eq!(mode, "delete");
+    let saved_status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = 'saved-job'")
+        .fetch_one(&mut copy)
+        .await
+        .unwrap();
+    assert_eq!(saved_status, "queued");
     copy.close().await.unwrap();
 
     SqliteJobRepository::new(writer.clone())
@@ -230,6 +235,18 @@ async fn restored_rollback_journal_snapshot_reopens_with_operational_pools() {
         .unwrap();
     reader.close().await;
     writer.close().await;
+    // Offline restore replaces the database and discards journals from its old
+    // contents, just like panelctl backup restore. Pool shutdown alone does not
+    // guarantee that SQLite removed the old WAL/SHM files.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        match std::fs::remove_file(std::path::PathBuf::from(sidecar)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("could not remove offline restore journal: {error}"),
+        }
+    }
     std::fs::copy(&snapshot, &path).unwrap();
 
     let (writer, reader) = operations::open(&core).await.unwrap();
