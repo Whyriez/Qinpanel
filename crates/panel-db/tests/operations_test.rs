@@ -235,9 +235,12 @@ async fn restored_rollback_journal_snapshot_reopens_with_operational_pools() {
         .unwrap();
     reader.close().await;
     writer.close().await;
+    core.close().await;
+    assert!(reader.is_closed() && writer.is_closed() && core.is_closed());
     // Offline restore replaces the database and discards journals from its old
-    // contents, just like panelctl backup restore. Pool shutdown alone does not
-    // guarantee that SQLite removed the old WAL/SHM files.
+    // contents. Close every pool before touching files, including the core pool
+    // used by the legacy import. Publish a new inode instead of overwriting the
+    // original SQLite file in place within the same process.
     for suffix in ["-wal", "-shm"] {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
@@ -247,9 +250,41 @@ async fn restored_rollback_journal_snapshot_reopens_with_operational_pools() {
             Err(error) => panic!("could not remove offline restore journal: {error}"),
         }
     }
-    std::fs::copy(&snapshot, &path).unwrap();
+    let candidate = temp.path().join("restored-operations.db");
+    std::fs::copy(&snapshot, &candidate).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(&candidate, &path).unwrap();
 
-    let (writer, reader) = operations::open(&core).await.unwrap();
+    // Inspect the published snapshot without changing its journal mode, then
+    // close that connection before the operational writer establishes WAL.
+    let mut restored = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&path),
+    )
+    .await
+    .expect("open restored standalone snapshot");
+    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&mut restored)
+        .await
+        .unwrap();
+    assert_eq!(mode, "delete");
+    let restored_status: String =
+        sqlx::query_scalar("SELECT status FROM jobs WHERE id = 'saved-job'")
+            .fetch_one(&mut restored)
+            .await
+            .unwrap();
+    assert_eq!(restored_status, "queued");
+    restored.close().await.expect("close snapshot inspector");
+
+    let core = init_pool(&format!(
+        "sqlite://{}",
+        temp.path().join("panel.db").display()
+    ))
+    .await
+    .expect("reopen core after offline restore");
+
+    let (writer, reader) = operations::open(&core)
+        .await
+        .expect("open operational pools after cold restore");
     for pool in [&writer, &reader] {
         let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
             .fetch_one(pool)
