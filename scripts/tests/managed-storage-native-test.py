@@ -175,13 +175,13 @@ def main():
             challenge = Path("/var/lib/panel/acme/.well-known/acme-challenge/native-storage")
             challenge.parent.mkdir(parents=True, exist_ok=True)
             challenge.write_text("native HTTP-01 fixture")
-            http = http.client.HTTPConnection("127.0.0.1", 80, timeout=10)
+            challenge_connection = http.client.HTTPConnection("127.0.0.1", 80, timeout=10)
             try:
-                http.request("GET", "/.well-known/acme-challenge/native-storage", headers={"host": HOST})
-                response = http.getresponse()
+                challenge_connection.request("GET", "/.well-known/acme-challenge/native-storage", headers={"host": HOST})
+                response = challenge_connection.getresponse()
                 assert (response.status, response.read()) == (200, b"native HTTP-01 fixture")
             finally:
-                http.close()
+                challenge_connection.close()
                 challenge.unlink()
             assert Path("/etc/qonpanel-storage/state.json").read_bytes() == before
             origin = control({"action": "configure_tunnel", "hostname": HOST})
