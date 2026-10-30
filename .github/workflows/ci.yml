@@ -91,6 +91,9 @@ jobs:
       - name: Release artifact security evidence fixtures
         run: python3 scripts/tests/release-security-gate-test.py
 
+      - name: AlmaLinux pre-checkout repository bootstrap (mock DNF)
+        run: python3 scripts/tests/almalinux-repo-ci-test.py
+
       - name: Check formatting (rustfmt)
         run: cargo fmt --check
 

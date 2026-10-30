@@ -11,6 +11,10 @@ awk '
     found && commands { sub(/^          /, ""); print }
 ' "$REPO/.github/workflows/platform-compatibility.yml" > "$fixture/bootstrap.sh"
 [[ -s "$fixture/bootstrap.sh" ]]
+# Never edit the host's repository files when exercising the new CI prelude.
+# Actual repository rewrites/retries are covered by almalinux-repo-ci-test.py.
+CI_FIXTURE_REPOS="$fixture/repos"
+sed -i 's@/etc/yum.repos.d/almalinux\*\.repo@"$CI_FIXTURE_REPOS"/almalinux*.repo@' "$fixture/bootstrap.sh"
 
 dnf() { printf 'dnf %s\n' "$*" >> "$fixture/commands"; }
 apt-get() { printf 'apt-get %s\n' "$*" >> "$fixture/commands"; }

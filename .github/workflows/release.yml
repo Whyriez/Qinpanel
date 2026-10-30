@@ -67,7 +67,29 @@ jobs:
 
     steps:
       - name: Install native release prerequisites
-        run: dnf -y install git gcc gcc-c++ make perl python3 pkgconf-pkg-config openssl-devel tar gzip xz unzip which findutils diffutils binutils
+        run: |
+          # AlmaLinux CI repositories: begin (also used before release checkout).
+          for repo in /etc/yum.repos.d/almalinux*.repo; do
+            [ -f "$repo" ] || continue
+            sed -i -E \
+              -e 's|^[[:space:]]*mirrorlist=|#mirrorlist=|' \
+              -e 's@^[[:space:]]*#?[[:space:]]*baseurl=https?://((repo|vault)\.almalinux\.org/)@baseurl=https://\1@' "$repo"
+          done
+          dnf -q clean metadata
+          for attempt in 1 2 3; do
+            if dnf -y --setopt=retries=2 --setopt=timeout=30 --setopt=skip_if_unavailable=False makecache --refresh; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo '::error::AlmaLinux repository metadata is still unavailable after three attempts.' >&2
+              exit 1
+            fi
+            echo "::warning::AlmaLinux metadata attempt $attempt/3 failed; clearing cache before retry." >&2
+            dnf -q clean metadata
+            sleep "$((attempt * 5))"
+          done
+          # AlmaLinux CI repositories: end.
+          dnf -y install git gcc gcc-c++ make perl python3 pkgconf-pkg-config openssl-devel tar gzip xz unzip which findutils diffutils binutils
 
       - name: Checkout repository
         uses: actions/checkout@v5
