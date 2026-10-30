@@ -365,8 +365,12 @@ async fn process(
     }
     let result = issue_and_apply(pool, services, &row).await;
     if let Err(message) = result {
-        // Only static, approved messages reach durable metadata and job logs.
-        let message = format!("{message} Perpanjangan otomatis dijeda.");
+        // Only static messages or reconstructed bounded provider diagnostics reach logs.
+        let message = if row.method == "tunnel" {
+            format!("{message} Aktivasi Tunnel belum selesai.")
+        } else {
+            format!("{message} Perpanjangan otomatis dijeda.")
+        };
         let _=sqlx::query("UPDATE managed_storage_tls SET state='failed',auto_renew=0,updated_at=?,error=? WHERE id=1 AND revision=? AND state='issuing'")
             .bind(now()).bind(&message).bind(row.revision).execute(pool).await;
         return Err(message);
@@ -441,17 +445,13 @@ fn configuration_failure(result: &Value) -> &'static str {
     }
 }
 
-async fn issue_and_apply(
-    pool: &DbPool,
-    services: &Services,
-    row: &Binding,
-) -> Result<(), &'static str> {
+async fn issue_and_apply(pool: &DbPool, services: &Services, row: &Binding) -> Result<(), String> {
     let host = row.hostname.as_deref().ok_or("Domain tidak tersedia.")?;
     if row.method == "tunnel" {
         let configured = services.runtime.managed(ManagedStorageRequest::ConfigureTunnel { hostname: host.into() }).await
             .map_err(|_| "Aktivasi origin Tunnel storage gagal. Periksa panel-agent dan layanan storage.")?;
         if configured.get("error").is_some() {
-            return Err(configuration_failure(&configured));
+            return Err("Aktivasi origin Tunnel storage gagal. Periksa status layanan storage, tahap pemasangan dan rollback sebelum mencoba lagi.".into());
         }
         if configured["configured"] != true
             || configured["running"] != true
@@ -459,19 +459,28 @@ async fn issue_and_apply(
             || configured["connection_mode"] != "tunnel"
             || configured["endpoint"] != format!("https://{host}")
         {
-            return Err("Origin HTTP loopback storage belum siap; rute Tunnel belum diterbitkan.");
+            return Err(
+                "Origin HTTP loopback storage belum siap; rute Tunnel belum diterbitkan.".into(),
+            );
         }
-        let published = services.runtime.publish_tunnel(row.zone_id.clone().ok_or("Zona Tunnel tidak tersedia.")?, row.tunnel_id.clone().ok_or("Tunnel tidak tersedia.")?, host.into()).await
-            .map_err(|_| "Origin storage lokal siap, tetapi publikasi Tunnel belum berhasil. Periksa konektor lokal aktif, izin management Tunnel/DNS dan konflik hostname; muat ulang sebelum mencoba lagi.")?;
+        let published = services
+            .runtime
+            .publish_tunnel(
+                row.zone_id.clone().ok_or("Zona Tunnel tidak tersedia.")?,
+                row.tunnel_id.clone().ok_or("Tunnel tidak tersedia.")?,
+                host.into(),
+            )
+            .await
+            .map_err(|error| format!("Origin storage lokal siap. {}", error.message()))?;
         if published["published"] != true {
             return Err(
-                "Publikasi rute storage belum dapat dipastikan; periksa konfigurasi Tunnel sebelum mencoba lagi.",
+                "Publikasi rute storage belum dapat dipastikan; periksa konfigurasi Tunnel sebelum mencoba lagi.".into(),
             );
         }
         let changed = sqlx::query("UPDATE managed_storage_tls SET state='active',auto_renew=0,not_before=NULL,not_after=NULL,renew_at=NULL,updated_at=?,error=NULL WHERE id=1 AND revision=? AND state='issuing'")
             .bind(now()).bind(row.revision).execute(pool).await.map_err(|_| "Status aktivasi storage gagal disimpan.")?;
         if changed.rows_affected() != 1 {
-            return Err("Revisi aktivasi storage berubah.");
+            return Err("Revisi aktivasi storage berubah.".into());
         }
         return Ok(());
     }
@@ -488,7 +497,7 @@ async fn issue_and_apply(
             )?;
         if prepared["prepared"] != true {
             return Err(
-                "Listener HTTP-01 tidak siap. Periksa konflik domain dan Nginx sebelum mencoba lagi.",
+                "Listener HTTP-01 tidak siap. Periksa konflik domain dan Nginx sebelum mencoba lagi.".into(),
             );
         }
         services.runtime.http_certificate(pool.clone(), host.into(), email.into()).await
@@ -509,7 +518,7 @@ async fn issue_and_apply(
             || Some(&zone) != row.zone_name.as_ref()
             || current != revision
         {
-            return Err("Zona atau token DNS-01 berubah.");
+            return Err("Zona atau token DNS-01 berubah.".into());
         }
         services
             .runtime
@@ -528,7 +537,7 @@ async fn issue_and_apply(
         .await
         .map_err(|_| "Revisi storage gagal dimuat.")?;
     if current_row.revision != row.revision || current_row.state != "issuing" {
-        return Err("Permintaan storage sudah berubah.");
+        return Err("Permintaan storage sudah berubah.".into());
     }
     let result = services
         .runtime
@@ -540,20 +549,20 @@ async fn issue_and_apply(
         .await
         .map_err(|_| "Pemasangan sertifikat storage gagal. Periksa status layanan storage dan rollback sebelum mencoba lagi.")?;
     if result.get("error").is_some() {
-        return Err(configuration_failure(&result));
+        return Err(configuration_failure(&result).into());
     }
     if result["configured"] != true
         || result["running"] != true
         || result["endpoint"] != format!("https://{host}")
     {
         return Err(
-            "Listener HTTPS storage belum sehat. Periksa status layanan storage dan rollback sebelum mencoba lagi.",
+            "Listener HTTPS storage belum sehat. Periksa status layanan storage dan rollback sebelum mencoba lagi.".into(),
         );
     }
     let changed=sqlx::query("UPDATE managed_storage_tls SET state='active',not_before=?,not_after=?,renew_at=?,updated_at=?,error=NULL WHERE id=1 AND revision=? AND state='issuing'")
         .bind(validity.not_before).bind(validity.not_after).bind(panel_core::panel_tls::renewal_at(validity.not_before,validity.not_after,None)).bind(now()).bind(row.revision).execute(pool).await.map_err(|_|"Metadata sertifikat gagal disimpan.")?;
     if changed.rows_affected() != 1 {
-        return Err("Revisi sertifikat berubah setelah pemasangan.");
+        return Err("Revisi sertifikat berubah setelah pemasangan.".into());
     }
     Ok(())
 }
@@ -646,6 +655,7 @@ mod tests {
         http_issued: AtomicUsize,
         prepared: AtomicUsize,
         published: AtomicUsize,
+        publication_denied: AtomicBool,
         issued: AtomicUsize,
         applied: AtomicUsize,
         fail: AtomicBool,
@@ -669,11 +679,18 @@ mod tests {
             _zone_id: String,
             _tunnel_id: String,
             _hostname: String,
-        ) -> BoxFuture<'_, Result<Value, String>> {
+        ) -> BoxFuture<'_, Result<Value, super::super::StorageTunnelPublicationError>> {
             Box::pin(async move {
                 self.published.fetch_add(1, Ordering::SeqCst);
+                if self.publication_denied.load(Ordering::SeqCst) {
+                    return Err(super::super::StorageTunnelPublicationError::from_agent(crate::agent_client::AgentClientError::AgentError("Invalid input: Cloudflare menolak permintaan (HTTP 403, kode [10000]). Periksa izin token, akses akun/domain, dan konflik DNS.".into())));
+                }
                 if self.fail.load(Ordering::SeqCst) {
-                    return Err("fixture_secret_provider_response".into());
+                    return Err(super::super::StorageTunnelPublicationError::from_agent(
+                        crate::agent_client::AgentClientError::AgentError(
+                            "fixture_secret_provider_response".into(),
+                        ),
+                    ));
                 }
                 Ok(json!({"published":true}))
             })
@@ -826,9 +843,27 @@ mod tests {
             .expect_err("publication failure");
         assert!(error.contains("lokal siap"));
         assert!(!error.contains("fixture_secret"));
+        assert!(!error.contains("Perpanjangan otomatis"));
+        assert!(error.contains("Aktivasi Tunnel belum selesai"));
         let row = binding(&pool).await.expect("binding");
         assert_eq!(row.state, "failed");
         assert!(!row.auto_renew);
+        assert_eq!(runtime.issued.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn tunnel_denial_keeps_safe_provider_status_and_permission_guidance_in_durable_error() {
+        let (pool, runtime, services, job, payload) = fixture().await;
+        sqlx::query("UPDATE managed_storage_tls SET method='tunnel',tunnel_id='7c03851f-60dd-49d1-a3aa-a2100320e7c9',auto_renew=0").execute(&pool).await.expect("mode");
+        runtime.publication_denied.store(true, Ordering::SeqCst);
+        let error = process(&pool, &services, &job, &payload)
+            .await
+            .expect_err("provider denial");
+        assert!(error.contains("HTTP 403, kode [10000]"));
+        assert!(error.contains("Zone DNS Edit dan Zone Read"));
+        assert!(!error.contains("Perpanjangan otomatis"));
+        let row = binding(&pool).await.expect("binding");
+        assert_eq!(row.state, "failed");
+        assert_eq!(row.error.as_deref(), Some(error.as_str()));
         assert_eq!(runtime.issued.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]

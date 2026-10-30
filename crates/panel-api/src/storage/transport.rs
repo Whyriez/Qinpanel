@@ -46,6 +46,19 @@ async fn execute_inner(
         return execute_managed(&connection, &credentials, operation, &panel).await;
     }
     let (core, targets) = admit(&connection, &panel).await?;
+    if let Operation::AccessLink { key, expires_in } = &operation {
+        return Ok(Outcome::Download {
+            url: signing::access(
+                &connection,
+                &credentials,
+                key,
+                chrono::Utc::now(),
+                *expires_in,
+                false,
+            )?,
+            expires_at: chrono::Utc::now().timestamp() + i64::from(*expires_in),
+        });
+    }
     if let Operation::Download { key } = &operation {
         super::domain::key(key)?;
         return Ok(Outcome::Download {
@@ -89,6 +102,19 @@ async fn execute_managed(
             == panel.host
     {
         return Err(Failure::Endpoint);
+    }
+    if let Operation::AccessLink { key, expires_in } = &operation {
+        return Ok(Outcome::Download {
+            url: signing::access(
+                connection,
+                credentials,
+                key,
+                chrono::Utc::now(),
+                *expires_in,
+                false,
+            )?,
+            expires_at: chrono::Utc::now().timestamp() + i64::from(*expires_in),
+        });
     }
     if let Operation::Download { key } = &operation {
         super::domain::key(key)?;
@@ -335,7 +361,7 @@ fn prepare(connection: &Connection, operation: &Operation) -> Result<Prepared, F
                 true,
             ))
         }
-        Operation::Download { .. } => Err(Failure::Invalid),
+        Operation::Download { .. } | Operation::AccessLink { .. } => Err(Failure::Invalid),
     }
 }
 

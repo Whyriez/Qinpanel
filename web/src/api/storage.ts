@@ -22,12 +22,29 @@ export interface ConnectionInput {
 export interface StorageObject { key: string; size: number; modified_at: string }
 export interface StorageListing { objects: StorageObject[]; prefixes: string[]; next_token: string | null }
 export interface StorageRules { read: boolean; write: boolean; delete: boolean; max_file_bytes: number; extensions: string[] }
+export interface StorageAccess { revision: number; visibility: 'private' | 'public' | 'provider'; desired_visibility: 'private' | 'public'; state: 'ready' | 'applying' | 'unknown'; request_id: string | null; can_change: boolean }
+export interface StorageObjectLink { kind: 'public' | 'signed'; url: string; expires_at: number | null }
 export interface StoragePolicy {
   revision: number; quota_bytes: number | null; used_bytes: number | null; object_count: number | null;
   measured_at: number | null; rules: StorageRules; enforcement: 'panel'; visibility: 'owner';
 }
 const root = '/api/v1/storage';
 const path = (id: string) => `${root}/connections/${encodeURIComponent(id)}`;
+export const fetchStorageAccess = (id: string, signal?: AbortSignal) => request<StorageAccess>(`${path(id)}/access`, { signal });
+export const saveStorageAccess = (id: string, value: { request_id: string; expected_revision: number; visibility: 'private' | 'public' }) => request<StorageAccess>(`${path(id)}/access`, { method: 'POST', body: JSON.stringify(value) });
+export const fetchStorageObjectLink = (connection: StorageConnection, key: string, expires_in: number, signal?: AbortSignal) => request<StorageObjectLink>(`${path(connection.id)}/link`, { method: 'POST', body: JSON.stringify({ expected_revision: connection.revision, key, expires_in }), signal });
+export function publicStorageUrl(connection: StorageConnection, key: string): string {
+  if (!validObjectKey(key)) throw new Error('Invalid object key');
+  const endpoint = new URL(connection.endpoint);
+  const host = connection.addressing === 'virtual_host' ? `${connection.bucket}.${endpoint.hostname}` : endpoint.hostname;
+  return `https://${host}${endpoint.pathname.replace(/\/$/, '')}${connection.addressing === 'path' ? `/${encodeURIComponent(connection.bucket)}` : ''}/${key.split('/').map(encodeURIComponent).join('/')}`;
+}
+export function safeStorageObjectLink(link: StorageObjectLink, connection: StorageConnection, key: string): string {
+  const url = new URL(link.url); const expected = new URL(publicStorageUrl(connection, key));
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.host !== expected.host || url.pathname !== expected.pathname
+    || !['public', 'signed'].includes(link.kind) || (link.kind === 'public' ? link.expires_at !== null || !!url.search : link.expires_at === null || link.expires_at <= Date.now()/1000 || link.expires_at > Date.now()/1000+86405 || !url.searchParams.has('X-Amz-Signature'))) throw new Error('Invalid storage access URL');
+  return url.href;
+}
 export const fetchStoragePolicy = (id: string, signal?: AbortSignal) => request<StoragePolicy>(`${path(id)}/policy`, { signal });
 export const saveStorageRules = (id: string, policy: StoragePolicy, rules: StorageRules) => request<StoragePolicy>(`${path(id)}/policy`, { method: 'POST', body: JSON.stringify({ expected_revision: policy.revision, rules }) });
 export const saveStorageAllocation = (id: string, policy: StoragePolicy, quota_bytes: number | null) => request<StoragePolicy>(`${path(id)}/allocation`, { method: 'POST', body: JSON.stringify({ expected_revision: policy.revision, quota_bytes }) });

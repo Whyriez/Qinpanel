@@ -285,6 +285,116 @@ class WorkerTests(unittest.TestCase):
                 with self.subTest(action=action, extra=extra), self.assertRaises(worker.StorageError):
                     worker.validate_request(dict(value, **{extra: "untrusted"}))
 
+    def access_request(self, public=True, expected=1, revision=2):
+        return {"action":"set_bucket_access", "connection_id":operation()["connection_id"], "owner_id":2, "bucket":"alice-media", "expected_revision":expected, "revision":revision, "public":public}
+
+    def prepare_access(self):
+        self.controller.allocate(operation())
+        self.controller.nginx.write_bytes(worker.nginx_template(self.state["hostname"], "a"*64).encode())
+
+    def test_public_access_wire_is_typed_and_never_accepts_global_paths_or_other_owner(self):
+        value = self.access_request()
+        self.assertEqual(worker.validate_request(value), value)
+        for change in ({"path":"/etc"}, {"public":"true"}, {"revision":1}, {"expected_revision":0}, {"command":"restart"}):
+            with self.subTest(change=change), self.assertRaises(worker.StorageError):
+                worker.validate_request(dict(value, **change))
+        self.prepare_access()
+        with self.assertRaises(worker.StorageError):
+            self.controller.set_bucket_access(dict(value, owner_id=3))
+
+    def test_anonymous_read_is_bucket_scoped_without_list_write_or_private_bucket_access(self):
+        self.prepare_access()
+        self.controller.allocate(operation(identifier="ed603234-a37a-446d-b549-83fc0c00b44f",bucket="bob-media",owner=3))
+        before = self.controller.state()
+        with patch.object(worker, "anonymous_request", side_effect=[404,403]):
+            self.assertTrue(self.controller.set_bucket_access(self.access_request())["public"])
+        after = self.controller.state()
+        anonymous = next(item for item in worker.auth_document(after)["identities"] if item["name"]=="anonymous")
+        self.assertEqual(anonymous, {"name":"anonymous","actions":["Read:alice-media"]})
+        self.assertEqual(after["root"], before["root"])
+        for key, record in before["buckets"].items():
+            self.assertEqual(after["buckets"][key]["panel"], record["panel"])
+            self.assertEqual(after["buckets"][key]["owner_id"], record["owner_id"])
+
+    def test_private_revokes_anonymous_and_same_revision_retry_preserves_keys(self):
+        self.prepare_access()
+        with patch.object(worker, "anonymous_request", side_effect=[404,403,404,403,403,403]):
+            first = self.controller.set_bucket_access(self.access_request())
+            keys_before = self.controller.state()["buckets"][operation()["connection_id"]]["panel"]
+            self.assertEqual(self.controller.set_bucket_access(self.access_request()),first)
+            self.assertFalse(self.controller.set_bucket_access(self.access_request(False,2,3))["public"])
+        self.assertFalse(any(item["name"]=="anonymous" for item in worker.auth_document(self.controller.state())["identities"]))
+        self.assertEqual(self.controller.state()["buckets"][operation()["connection_id"]]["panel"],keys_before)
+        with self.assertRaises(worker.StorageError):
+            self.controller.set_bucket_access(self.access_request())
+
+    def test_restart_unknown_outcome_retains_desired_revision_for_reconciliation(self):
+        self.prepare_access()
+        with patch.object(worker,"command",side_effect=worker.StorageError("restart failed")),self.assertRaises(worker.StorageError):
+            self.controller.set_bucket_access(self.access_request())
+        self.assertEqual(self.controller.state()["buckets"][operation()["connection_id"]]["access_revision"],2)
+        with patch.object(worker,"anonymous_request",side_effect=[404,403]):
+            self.assertTrue(self.controller.set_bucket_access(self.access_request())["ready"])
+
+    def test_publication_refuses_anonymous_list_and_failed_revoke_never_reports_success(self):
+        self.prepare_access()
+        for request, outcomes in [(self.access_request(),[404,200]),(self.access_request(False,2,3),[404])]:
+            with patch.object(worker,"anonymous_request",side_effect=outcomes), self.assertRaises(worker.StorageError):
+                self.controller.set_bucket_access(request)
+
+    def test_existing_proxy_cache_policy_upgrades_once_without_changing_host_uri_or_tls(self):
+        self.prepare_access()
+        old = self.controller.nginx.read_bytes().replace(worker.CACHE_RULE.encode(),b"")
+        self.controller.nginx.write_bytes(old)
+        with patch.object(worker,"anonymous_request",side_effect=[404,403,404,403]):
+            self.controller.set_bucket_access(self.access_request())
+            upgraded = self.controller.nginx.read_bytes()
+            self.controller.set_bucket_access(self.access_request())
+        self.assertEqual(self.controller.nginx.read_bytes(),upgraded)
+        self.assertEqual(upgraded.replace(worker.CACHE_RULE.encode(),b""),old)
+        self.assertIn(b'add_header Cache-Control "no-store" always;',upgraded)
+
+    def test_retained_https_origin_is_upgraded_even_when_tunnel_already_has_no_store(self):
+        self.prepare_access()
+        tunnel = worker.tunnel_template(self.state["hostname"])
+        legacy = worker.nginx_template(self.state["hostname"], "a"*64).replace(worker.CACHE_RULE, "")
+        self.controller.nginx.write_text(tunnel + "# Retained HTTPS origin\n" + legacy)
+        with patch.object(worker, "anonymous_request", side_effect=[404,403,404,403]):
+            self.controller.set_bucket_access(self.access_request())
+            first = self.controller.nginx.read_bytes()
+            self.controller.set_bucket_access(self.access_request())
+        self.assertEqual(first, self.controller.nginx.read_bytes())
+        self.assertEqual(first.count(worker.CACHE_RULE.encode()), 2)
+        self.assertIn(b"listen 443 ssl", first)
+        self.assertIn(b"listen 127.0.0.1:17891", first)
+
+    def test_modified_proxy_is_preserved_instead_of_silently_publishing_without_cache_policy(self):
+        self.prepare_access()
+        proxy = self.controller.nginx.read_bytes().replace(worker.CACHE_RULE.encode(), b"").replace(b"        proxy_set_header Host", b"    proxy_set_header Host")
+        self.controller.nginx.write_bytes(proxy)
+        before = self.controller.state_path.read_bytes()
+        with self.assertRaises(worker.StorageError):
+            self.controller.set_bucket_access(self.access_request())
+        self.assertEqual(before, self.controller.state_path.read_bytes())
+        self.assertEqual(proxy, self.controller.nginx.read_bytes())
+
+    def test_cache_policy_failure_rolls_back_before_publishing_bucket(self):
+        self.prepare_access()
+        old = self.controller.nginx.read_bytes().replace(worker.CACHE_RULE.encode(),b"")
+        self.controller.nginx.write_bytes(old)
+        before = self.controller.state_path.read_bytes()
+        failed = False
+        def command(args,timeout=60):
+            nonlocal failed
+            if args==["nginx","-t"] and not failed:
+                failed=True
+                raise worker.StorageError("bad config")
+            return b""
+        with patch.object(worker,"command",side_effect=command),self.assertRaises(worker.StorageError):
+            self.controller.set_bucket_access(self.access_request())
+        self.assertEqual(self.controller.nginx.read_bytes(),old)
+        self.assertEqual(self.controller.state_path.read_bytes(),before)
+
     def test_tunnel_listener_is_loopback_only_and_preserves_s3_request(self):
         config = worker.tunnel_template(self.state["hostname"])
         self.assertIn("listen 127.0.0.1:17891 default_server", config)

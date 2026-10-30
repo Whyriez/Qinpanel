@@ -29,6 +29,11 @@ def initialize(db):
     db.commit()
 
 
+def migrate_storage(db):
+    db.executescript(MIGRATION.read_text())
+    db.executescript((ROOT / 'crates/panel-db/migrations/20261030000002_storage_bucket_access.sql').read_text())
+
+
 def connection(db):
     db.execute("INSERT INTO storage_connections(id,owner_id,site_id,label,provider,endpoint,region,addressing,bucket,credentials_enc,created_at,updated_at) VALUES('fixture',2,2,'Project media','compatible','https://objects.example.test','us-east-1','path','project-media','enc:v1:fixture',1,1)")
     db.execute("UPDATE storage_connections SET verified_revision=1,verified_at=1000")
@@ -44,7 +49,7 @@ class StorageMigrationTests(unittest.TestCase):
         with closing(sqlite3.connect(':memory:')) as db:
             initialize(db)
             old = {name: db.execute('SELECT * FROM ' + name).fetchall() for name in ['users', 'sites', 'domains', 'plans', 'settings', 'ai_settings']}
-            db.executescript(MIGRATION.read_text())
+            migrate_storage(db)
             for name, rows in old.items():
                 self.assertEqual(db.execute('SELECT * FROM ' + name).fetchall(), rows)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM storage_connections').fetchone()[0], 0)
@@ -58,7 +63,7 @@ class StorageMigrationTests(unittest.TestCase):
     def test_cipher_constraint_and_endpoint_bucket_uniqueness(self):
         with closing(sqlite3.connect(':memory:')) as db:
             initialize(db)
-            db.executescript(MIGRATION.read_text())
+            migrate_storage(db)
             connection(db)
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute("UPDATE storage_connections SET credentials_enc='plaintext secret'")
@@ -69,7 +74,7 @@ class StorageMigrationTests(unittest.TestCase):
     def test_active_operation_blocks_binding_and_stale_revision(self):
         with closing(sqlite3.connect(':memory:')) as db:
             initialize(db)
-            db.executescript(MIGRATION.read_text())
+            migrate_storage(db)
             connection(db)
             self.assertEqual(reserve(db, 'one'), 1)
             self.assertEqual(db.execute(BIND, (None, 1001, 'fixture', 1, 'fixture', 881)).rowcount, 0)
@@ -80,7 +85,7 @@ class StorageMigrationTests(unittest.TestCase):
     def test_project_deletion_retains_bucket_metadata_and_tenant_deletion_only_removes_metadata(self):
         with closing(sqlite3.connect(':memory:')) as db:
             initialize(db)
-            db.executescript(MIGRATION.read_text())
+            migrate_storage(db)
             connection(db)
             db.execute('DELETE FROM sites WHERE id=2')
             self.assertIsNone(db.execute('SELECT site_id FROM storage_connections').fetchone()[0])
@@ -94,7 +99,7 @@ class StorageMigrationTests(unittest.TestCase):
             filename = str(Path(directory) / 'fixture.db')
             with closing(sqlite3.connect(filename)) as db:
                 initialize(db)
-                db.executescript(MIGRATION.read_text())
+                migrate_storage(db)
                 connection(db)
             barrier = threading.Barrier(2)
 

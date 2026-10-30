@@ -184,6 +184,10 @@ pub enum Operation {
     Download {
         key: String,
     },
+    AccessLink {
+        key: String,
+        expires_in: u32,
+    },
 }
 pub enum Outcome {
     Listing(Listing),

@@ -1,12 +1,19 @@
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
-import { AllocationEditor, RulesEditor, storageBytes } from './BucketPolicy';
+import { AllocationEditor, BucketPolicy, RulesEditor, storageBytes } from './BucketPolicy';
 import { ObjectDetail } from './ObjectExplorer';
+import { AccessEditor } from './BucketAccess';
 import type { StorageConnection, StoragePolicy } from '../../api/storage';
 
 const policy: StoragePolicy = { revision: 1, quota_bytes: 1073741824, used_bytes: null, object_count: null, measured_at: null, visibility: 'owner', enforcement: 'panel', rules: { read: true, write: true, delete: true, max_file_bytes: 33554432, extensions: [] } };
 const connection = { id: 'fixture', bucket: 'media', managed: true } as StorageConnection;
 describe('Bucket workspace', () => {
+  it('does not label every bucket private in the transfer rules section', () => {
+    const html = renderToString(<BucketPolicy connection={connection} admin={false} english={false} locked={false} />);
+    expect(html).toContain('Rules transfer panel');
+    expect(html).toContain('Akses URL mengikuti pengaturan bucket');
+    expect(html).not.toContain('Private');
+  });
   it('distinguishes unmeasured totals from zero usage and formats disk allocations', () => {
     expect(storageBytes(null)).toBe('—'); expect(storageBytes(0)).toBe('0 B');
     expect(storageBytes(1073741824)).toBe('1 GiB');
@@ -18,7 +25,7 @@ describe('Bucket workspace', () => {
   });
   it('gives owners explicit default read/write/delete rules and bounded file size', () => {
     const html = renderToString(<RulesEditor policy={policy} english={false} disabled={false} onSave={vi.fn()} />);
-    expect(html).toContain('Akses publik tidak diaktifkan');
+    expect(html).toContain('Akses baca publik mengikuti pilihan akses bucket');
     expect(html.match(/checked=""/g)).toHaveLength(3);
     expect(html).toContain('max="32"'); expect(html).toContain('Ekstensi diizinkan');
     expect(html).not.toContain('Simpan alokasi');
@@ -26,13 +33,26 @@ describe('Bucket workspace', () => {
   it('shows object details and authenticated temporary links instead of claiming private files have public URLs', () => {
     const html = renderToString(<ObjectDetail connection={connection} object={{ key: 'photos/my photo.png', size: 2306867, modified_at: '2026-10-29T13:45:09Z' }} english={false} disabled={false} canDelete onClose={vi.fn()} onDelete={vi.fn()} />);
     expect(html).toContain('Detail file'); expect(html).toContain('photos/my photo.png');
-    expect(html).toMatch(/2[.,]2 MiB/); expect(html).toContain('Buat tautan unduh');
-    expect(html).toContain('memerlukan sesi tenant pemilik'); expect(html).toContain('Private');
+    expect(html).toMatch(/2[.,]2 MiB/); expect(html).toContain('Dapatkan URL'); expect(html).toContain('aria-label="Unduh file"');
+    expect(html).toContain('tanpa login panel'); expect(html).toContain('Private');
     expect(html).not.toContain('X-Amz-Signature'); expect(html).not.toContain('src="http');
+  });
+  it('shows public URLs directly with copy and open icons, and keeps download as an icon', () => {
+    const html = renderToString(<ObjectDetail connection={{ ...connection, endpoint: 'https://storage.example.test', addressing: 'path' }} access={{ revision: 2, visibility: 'public', desired_visibility: 'public', state: 'ready', request_id: null, can_change: true }} object={{ key: 'photos/my photo.png', size: 100, modified_at: '2026-10-30T00:00:00Z' }} english={false} disabled={false} canDelete onClose={vi.fn()} onDelete={vi.fn()} />);
+    expect(html).toContain('https://storage.example.test/media/photos/my%20photo.png');
+    expect(html).toContain('URL publik'); expect(html).toContain('aria-label="Salin URL"'); expect(html).toContain('aria-label="Buka URL"');
+    expect(html).toContain('aria-label="Unduh file"'); expect(html).not.toContain('Buat tautan unduh'); expect(html).not.toContain('Dapatkan URL');
+  });
+  it('makes public read opt-in for the entire native bucket and exposes reconciliation for unknown changes', () => {
+    const base = { revision: 1, visibility: 'private' as const, desired_visibility: 'private' as const, state: 'ready' as const, request_id: null, can_change: true };
+    const render = (access: typeof base | { revision: number; visibility: 'private'; desired_visibility: 'private'; state: 'unknown'; request_id: string; can_change: boolean }) => renderToString(<AccessEditor connection={connection} access={access} english={false} onChanged={vi.fn()} onBusy={vi.fn()} />);
+    expect(render(base)).toContain('Public'); expect(render(base)).toContain('semua file di bucket ini');
+    expect(render(base)).toContain('Upload, hapus'); expect(render(base)).toMatch(/<button[^>]*disabled/);
+    expect(render({ ...base, state: 'unknown', request_id: 'pending' })).toContain('Sinkronkan perubahan akses');
   });
   it('does not promise session-only access for an external presigned download', () => {
     const html = renderToString(<ObjectDetail connection={{ ...connection, managed: false }} object={{ key: 'document.svg', size: 100, modified_at: '2026-10-29T13:45:09Z' }} english disabled={false} canDelete={false} onClose={vi.fn()} onDelete={vi.fn()} />);
-    expect(html).toContain('Anyone receiving it can download'); expect(html).toContain('Preview unavailable');
+    expect(html).toContain('Anyone with the signed URL can open'); expect(html).toContain('Preview unavailable');
     expect(html).not.toContain('<img');
   });
 });

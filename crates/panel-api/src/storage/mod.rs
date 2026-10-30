@@ -1,4 +1,5 @@
 //! Tenant-scoped object storage. No provider key leaves the authenticated backend.
+pub(crate) mod access;
 pub mod domain;
 pub(crate) mod handlers;
 pub(crate) mod managed;
@@ -7,6 +8,8 @@ mod signing;
 mod store;
 pub(crate) mod tls;
 mod transport;
+mod tunnel;
+pub use tunnel::PublicationError as StorageTunnelPublicationError;
 
 use crate::{agent_client::AgentClient, routes::AppState};
 use axum::{
@@ -87,8 +90,8 @@ pub trait StorageRuntime: Send + Sync {
         _zone_id: String,
         _tunnel_id: String,
         _hostname: String,
-    ) -> BoxFuture<'_, Result<Value, String>> {
-        Box::pin(async { Err("Publikasi Tunnel belum tersedia.".into()) })
+    ) -> BoxFuture<'_, Result<Value, StorageTunnelPublicationError>> {
+        Box::pin(async { Err(tunnel::PublicationError::unavailable()) })
     }
     fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
         Box::pin(async { Err(Failure::Unavailable) })
@@ -145,10 +148,16 @@ impl StorageRuntime for LiveRuntime {
         zone_id: String,
         tunnel_id: String,
         hostname: String,
-    ) -> BoxFuture<'_, Result<Value, String>> {
+    ) -> BoxFuture<'_, Result<Value, tunnel::PublicationError>> {
         Box::pin(async move {
-            self.agent.cloudflare(panel_proto::CloudflareRequest::PublishStorage { zone_id, tunnel_id, hostname }).await
-                .map_err(|_| "Origin storage lokal siap, tetapi publikasi Tunnel belum berhasil. Periksa konektor lokal aktif, izin management Tunnel/DNS dan konflik hostname; muat ulang sebelum mencoba lagi.".into())
+            self.agent
+                .cloudflare(panel_proto::CloudflareRequest::PublishStorage {
+                    zone_id,
+                    tunnel_id,
+                    hostname,
+                })
+                .await
+                .map_err(tunnel::PublicationError::from_agent)
         })
     }
     fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
@@ -232,6 +241,11 @@ pub fn router(agent: Arc<AgentClient>) -> Router<AppState> {
 }
 pub fn router_with_runtime(runtime: Arc<dyn StorageRuntime>) -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v1/storage/connections/{id}/access",
+            get(access::overview).post(access::update),
+        )
+        .route("/api/v1/storage/connections/{id}/link", post(access::link))
         .route("/api/v1/storage/context", get(handlers::context))
         .route(
             "/api/v1/storage/connections/{id}/policy",

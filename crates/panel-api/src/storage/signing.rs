@@ -147,6 +147,31 @@ pub fn download(
     key: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<String, Failure> {
+    access(connection, credentials, key, now, 60, true)
+}
+
+pub fn public_url(connection: &Connection, key: &str) -> Result<String, Failure> {
+    super::domain::key(key)?;
+    connection.validate().map_err(|_| Failure::Invalid)?;
+    Ok(format!(
+        "https://{}{}",
+        connection.request_host().map_err(|_| Failure::Invalid)?,
+        path(connection, Some(key))
+    ))
+}
+
+pub fn access(
+    connection: &Connection,
+    credentials: &S3Credentials,
+    key: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    seconds: u32,
+    attachment: bool,
+) -> Result<String, Failure> {
+    super::domain::key(key)?;
+    if !(60..=86400).contains(&seconds) {
+        return Err(Failure::Invalid);
+    }
     if credentials.session_token.is_some() {
         return Err(Failure::Invalid);
     }
@@ -160,9 +185,12 @@ pub fn download(
             format!("{}/{scope}", credentials.access_key),
         ),
         ("X-Amz-Date".into(), timestamp.clone()),
-        ("X-Amz-Expires".into(), "60".into()),
+        ("X-Amz-Expires".into(), seconds.to_string()),
         ("X-Amz-SignedHeaders".into(), "host".into()),
-        ("response-content-disposition".into(), "attachment".into()),
+        (
+            "response-content-disposition".into(),
+            if attachment { "attachment" } else { "inline" }.into(),
+        ),
     ];
     let path = path(connection, Some(key));
     let host = connection.request_host().map_err(|_| Failure::Invalid)?;

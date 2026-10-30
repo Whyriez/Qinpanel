@@ -20,7 +20,7 @@ DELETE_RESERVE = re.search(r'sqlx::query\("(UPDATE users SET status=\'deleting\'
 
 def initialize(db):
     base.initialize(db)
-    db.executescript(base.MIGRATION.read_text())
+    base.migrate_storage(db)
     base.connection(db)
     db.executescript(MIGRATION.read_text())
     db.execute("UPDATE storage_connections SET managed=1,managed_state='ready'")
@@ -31,7 +31,7 @@ class MigrationTests(unittest.TestCase):
     def test_existing_external_connection_and_identity_survive_upgrade(self):
         with closing(sqlite3.connect(":memory:")) as db:
             base.initialize(db)
-            db.executescript(base.MIGRATION.read_text())
+            base.migrate_storage(db)
             base.connection(db)
             old = db.execute("SELECT id,owner_id,site_id,credentials_enc,revision FROM storage_connections").fetchall()
             users = db.execute("SELECT * FROM users").fetchall()
@@ -95,7 +95,7 @@ class MigrationTests(unittest.TestCase):
     def test_allocation_cannot_race_an_already_reserved_tenant_deletion(self):
         with closing(sqlite3.connect(":memory:")) as db:
             base.initialize(db)
-            db.executescript(base.MIGRATION.read_text())
+            base.migrate_storage(db)
             base.connection(db)
             db.executescript(MIGRATION.read_text())
             self.assertEqual(db.execute(DELETE_RESERVE, (2, 2)).rowcount, 1)

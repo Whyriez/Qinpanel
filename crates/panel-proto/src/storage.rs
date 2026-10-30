@@ -39,6 +39,14 @@ pub enum ManagedStorageRequest {
     PrepareHttp {
         hostname: String,
     },
+    SetBucketAccess {
+        connection_id: uuid::Uuid,
+        owner_id: i64,
+        bucket: String,
+        expected_revision: u64,
+        revision: u64,
+        public: bool,
+    },
     Configure {
         hostname: String,
         fullchain_pem: StorageSecret,
@@ -174,6 +182,14 @@ mod tests {
                 connection_id,
                 owner_id: 2,
                 bucket: "fixture-media".into(),
+            },
+            ManagedStorageRequest::SetBucketAccess {
+                connection_id,
+                owner_id: 2,
+                bucket: "fixture-media".into(),
+                expected_revision: 1,
+                revision: 2,
+                public: true,
             },
         ] {
             let raw = serde_json::to_value(&request).expect("encode request");

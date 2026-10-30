@@ -41,6 +41,7 @@ DATA = "/var/lib/qonpanel-storage"
 CONFIG = "/etc/qonpanel-storage"
 ENGINE = "/usr/local/lib/qonpanel-storage/weed"
 MARKER = "# Managed by QonPanel object storage\n"
+CACHE_RULE = '        proxy_hide_header Cache-Control;\n        add_header Cache-Control "no-store" always;\n'
 TUNNEL_PORT = 17891
 ACME_CONFIG = "/etc/nginx/conf.d/qonpanel-object-storage-acme.conf"
 
@@ -154,6 +155,7 @@ def validate_request(value):
         "configure": {"action", "hostname", "fullchain_pem", "private_key_pem"},
         "configure_tunnel": {"action", "hostname"},
         "prepare_http": {"action", "hostname"},
+        "set_bucket_access": {"action", "connection_id", "owner_id", "bucket", "expected_revision", "revision", "public"},
         "provision": {"action", "connection_id", "owner_id", "bucket", "credentials"},
         "application_key": {"action", "connection_id", "owner_id", "bucket", "generation", "credentials"},
         "decommission": {"action", "connection_id", "owner_id", "bucket"},
@@ -166,7 +168,7 @@ def validate_request(value):
         for key in ("fullchain_pem", "private_key_pem"):
             if not isinstance(value[key], str) or not 64 <= len(value[key]) <= 65536:
                 raise StorageError("Supply a valid HTTPS certificate and private key.")
-    elif action in ("provision", "application_key", "decommission"):
+    elif action in ("provision", "application_key", "decommission", "set_bucket_access"):
         try:
             parsed = uuid.UUID(value["connection_id"])
         except (ValueError, TypeError, AttributeError):
@@ -174,8 +176,10 @@ def validate_request(value):
         if str(parsed) != value["connection_id"] or parsed.int == 0 or type(value["owner_id"]) is not int or value["owner_id"] <= 0:
             raise StorageError("Invalid bucket ownership.")
         bucket_name(value["bucket"])
-        if action != "decommission":
+        if action in ("provision", "application_key"):
             credentials(value["credentials"])
+        if action == "set_bucket_access" and (type(value["public"]) is not bool or type(value["expected_revision"]) is not int or type(value["revision"]) is not int or not 1 <= value["expected_revision"] < 2147483647 or value["revision"] != value["expected_revision"] + 1):
+            raise StorageError("Invalid bucket access revision.")
         if action == "application_key" and (type(value["generation"]) is not int or not 1 <= value["generation"] <= 2147483647):
             raise StorageError("Invalid application key generation.")
     return value
@@ -279,6 +283,7 @@ def nginx_template(host, revision):
         proxy_pass http://unix:{SOCKET};
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
+{CACHE_RULE.rstrip()}
         proxy_set_header Connection "";
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Authorization $http_authorization;
@@ -307,6 +312,7 @@ server {{
         proxy_pass http://unix:{SOCKET};
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;
+{CACHE_RULE.rstrip()}
         proxy_set_header Connection "";
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Authorization $http_authorization;
@@ -339,14 +345,30 @@ def auth_document(state):
     def identity(name, keys, actions):
         return {"name": name, "credentials": [{"accessKey": keys["access_key"], "secretKey": keys["secret_key"]}], "actions": actions}
     identities = [identity("qonpanel-control", state["root"], ["Admin", "Read", "List", "Write"])]
+    public_actions = []
     for key, record in sorted(state["buckets"].items()):
         if record.get("deleted"):
             continue
+        if record.get("public", False):
+            public_actions.append(f"Read:{record['bucket']}")
         actions = [f"{action}:{record['bucket']}" for action in ("Read", "List", "Write")]
         identities.append(identity(f"panel-{key}", record["panel"], actions))
         if record.get("application"):
             identities.append(identity(f"app-{key}", record["application"], actions))
+    if public_actions:
+        identities.append({"name": "anonymous", "actions": public_actions})
     return {"identities": identities}
+
+
+def anonymous_request(state, method, path):
+    connection = UnixHTTP("localhost", timeout=10)
+    try:
+        connection.request(method, path, headers={"host": state["hostname"]})
+        response = connection.getresponse()
+        response.read(65537)
+        return response.status
+    finally:
+        connection.close()
 
 
 class UnixHTTP(http.client.HTTPConnection):
@@ -792,6 +814,57 @@ class Controller:
             raise StorageError("Storage operation was interrupted. Retry the same allocation/key operation to reconcile; data was retained.") from None
         return {"ready": True, "generation": new["buckets"][key]["generation"]}
 
+    def set_bucket_access(self, request):
+        state = self.state()
+        key = request["connection_id"]
+        record = state["buckets"].get(key) if state else None
+        if not record or record.get("deleted") or record["owner_id"] != request["owner_id"] or record["bucket"] != request["bucket"]:
+            raise StorageError("The bucket allocation does not match its recorded owner.")
+        current = record.get("access_revision", 1)
+        same = current == request["revision"] and record.get("public", False) == request["public"]
+        if not same and current != request["expected_revision"]:
+            raise StorageError("Bucket access changed. Reconcile the same request before changing access again.")
+        # Upgrade only our proxy, preserving Host/URI/TLS and operator files. A
+        # public response must not be cached past a later switch back to private.
+        if self.nginx.is_symlink() or not self.nginx.is_file():
+            raise StorageError("The managed storage proxy is missing or unsafe.")
+        old_proxy = self.nginx.read_bytes()
+        proxy = old_proxy.decode().replace("\r\n", "\n")
+        if not proxy.startswith(MARKER) or "proxy_set_header Host $http_host;" not in proxy:
+            raise StorageError("The storage proxy was changed outside the panel; it was preserved.")
+        anchor = "        proxy_set_header Host $http_host;\n"
+        if proxy.count(anchor) != proxy.count("proxy_set_header Host $http_host;"):
+            raise StorageError("The storage proxy was changed outside the panel; it was preserved.")
+        # A Tunnel vhost can retain an older HTTPS block. Upgrade every origin,
+        # including when one block already has the current cache policy.
+        candidate = proxy.replace(anchor + CACHE_RULE, anchor).replace(anchor, anchor + CACHE_RULE)
+        if candidate != proxy:
+            try:
+                atomic_write(self.nginx, candidate.encode(), 0o644)
+                command(["nginx", "-t"], 20)
+                command(["systemctl", "reload", "nginx"])
+            except Exception:
+                try:
+                    atomic_write(self.nginx, old_proxy, 0o644)
+                    command(["nginx", "-t"], 20)
+                    command(["systemctl", "reload", "nginx"])
+                except Exception:
+                    raise StorageError("Storage cache-policy update failed and rollback is incomplete.") from None
+                raise StorageError("Storage cache-policy update failed; previous proxy restored.") from None
+        new = copy.deepcopy(state)
+        new["buckets"][key].update(public=request["public"], access_revision=request["revision"])
+        _, gid = self.identity()
+        # Keep the desired revision on an unknown restart outcome. Identical retries
+        # reconcile it without changing keys, ownership, objects or another bucket.
+        self.write_state(new, gid)
+        command(["systemctl", "restart", UNIT], 130)
+        self.healthy(new)
+        probe = f"/{record['bucket']}/.qinpanel-access-probe-{secrets.token_hex(16)}"
+        expected = 404 if request["public"] else 403
+        if anonymous_request(new, "HEAD", probe) != expected or anonymous_request(new, "GET", f"/{record['bucket']}?list-type=2") != 403:
+            raise StorageError("Bucket anonymous access was not confirmed. Reconcile the same access request.")
+        return {"ready": True, "public": request["public"], "revision": request["revision"]}
+
     def decommission(self, request):
         state = self.state()
         key = request["connection_id"]
@@ -861,6 +934,8 @@ def main():
             result = controller.configure(request)
         elif request["action"] == "prepare_http":
             result = controller.prepare_http(request)
+        elif request["action"] == "set_bucket_access":
+            result = controller.set_bucket_access(request)
         elif request["action"] == "decommission":
             result = controller.decommission(request)
         else:

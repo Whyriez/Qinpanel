@@ -59,7 +59,7 @@ class LocalHTTPS(http.client.HTTPSConnection):
         self.sock = ssl.create_default_context().wrap_socket(tcp, server_hostname=HOST)
 
 
-def request(method, path, keys=None, body=b"", tunnel=False, host=HOST):
+def request(method, path, keys=None, body=b"", tunnel=False, host=HOST, with_headers=False):
     headers = {"host": host}
     if keys:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -81,7 +81,8 @@ def request(method, path, keys=None, body=b"", tunnel=False, host=HOST):
     try:
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
-        return response.status, response.read()
+        result = (response.status, response.read())
+        return (*result, dict(response.getheaders())) if with_headers else result
     finally:
         connection.close()
 
@@ -179,6 +180,20 @@ def main():
             assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", alice, host="different.example.test"))[0] == 403, "A rewritten signed Host must not authorize the request"
             assert control({"action": "decommission", "connection_id": identities[0][0], "owner_id": 2, "bucket": "alice-media"}) == {"removed": False, "not_empty": True}
             assert request("GET", "/alice-media/nested/hello%20world.txt")[0] == 403
+            access = {"action": "set_bucket_access", "connection_id": identities[0][0], "owner_id": 2, "bucket": "alice-media", "expected_revision": 1, "revision": 2, "public": True}
+            assert control(access) == {"ready": True, "public": True, "revision": 2}
+            assert control(access)["ready"]  # Idempotent policy retry preserves keys and data.
+            public_status, public_body, public_headers = request("GET", "/alice-media/nested/hello%20world.txt", with_headers=True)
+            assert (public_status, public_body) == (200, b"Qinpanel native S3 fixture")
+            assert public_headers.get("Cache-Control") == "no-store", "Private revocation must not inherit a cached public response"
+            assert request("HEAD", "/alice-media/nested/hello%20world.txt")[0] == 200
+            for method, path in [("GET", "/alice-media?list-type=2"), ("PUT", "/alice-media/anonymous.txt"), ("DELETE", "/alice-media/nested/hello%20world.txt"), ("GET", "/bob-media/private.txt")]:
+                assert request(method, path)[0] == 403, f"Public read must not grant anonymous list/write or another bucket: {method} {path}"
+            run(["systemctl", "restart", "qonpanel-object-storage.service"], timeout=130)
+            assert request("GET", "/alice-media/nested/hello%20world.txt")[0] == 200
+            assert control({**access, "expected_revision": 2, "revision": 3, "public": False})["ready"]
+            assert request("GET", "/alice-media/nested/hello%20world.txt")[0] == 403
+            assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", alice))[0] == 200, "Private signed access still uses the existing owner key"
             for method, path in [("GET", "/bob-media?list-type=2"), ("PUT", "/bob-media/forbidden"), ("GET", "/bob-media/forbidden"), ("DELETE", "/bob-media/forbidden"), ("PUT", "/another-bucket"), ("DELETE", "/alice-media"), ("PUT", "/alice-media?policy")]:
                 assert request(method, path, alice)[0] == 403, f"Cross-bucket/admin operation must be denied: {method}"
             # The raw filer/master/volume ports live in the service's private network namespace.
@@ -212,6 +227,12 @@ def main():
             object_path = "/alice-media/nested/hello%20world.txt"
             assert request("GET", object_path, rotated, tunnel=True) == (200, b"Qinpanel native S3 fixture")
             assert request("GET", presigned_get(object_path, rotated), tunnel=True) == (200, b"Qinpanel native S3 fixture")
+            assert request("GET", object_path, tunnel=True)[0] == 403
+            assert control({**access, "expected_revision": 3, "revision": 4})["ready"]
+            assert request("GET", object_path, tunnel=True) == (200, b"Qinpanel native S3 fixture")
+            assert request("HEAD", object_path, tunnel=True)[0] == 200
+            assert request("GET", "/alice-media?list-type=2", tunnel=True)[0] == 403
+            assert control({**access, "expected_revision": 4, "revision": 5, "public": False})["ready"]
             assert request("GET", object_path, tunnel=True)[0] == 403
             assert request("GET", "/bob-media?list-type=2", rotated, tunnel=True)[0] == 403
             assert request("GET", presigned_get(object_path, alice), tunnel=True)[0] == 403

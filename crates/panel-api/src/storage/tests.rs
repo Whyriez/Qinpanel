@@ -50,6 +50,16 @@ async fn administrator_and_impersonated_sessions_cannot_access_owner_content() {
                 json!({"expected_revision":1,"key":"private.txt"}),
             ),
             (
+                "POST",
+                "link".to_string(),
+                json!({"expected_revision":1,"key":"private.txt","expires_in":3600}),
+            ),
+            (
+                "POST",
+                "access".to_string(),
+                json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":1,"visibility":"public"}),
+            ),
+            (
                 "GET",
                 format!(
                     "download?expected_revision=1&key=private.txt&expires_at={expires}&preview=true"
@@ -781,6 +791,16 @@ impl StorageRuntime for Fake {
                 panel_proto::ManagedStorageRequest::PrepareHttp { .. } => {
                     Ok(json!({"prepared":true}))
                 }
+                panel_proto::ManagedStorageRequest::SetBucketAccess {
+                    revision, public, ..
+                } => {
+                    self.calls.lock().expect("lock").push("managed_access");
+                    if self.managed_fail.load(Ordering::SeqCst) {
+                        Err(Failure::Timeout)
+                    } else {
+                        Ok(json!({"ready":true,"revision":revision,"public":public}))
+                    }
+                }
                 panel_proto::ManagedStorageRequest::Provision { .. } => {
                     self.calls.lock().expect("lock").push("managed_provision");
                     if self.managed_fail.load(Ordering::SeqCst) {
@@ -832,6 +852,7 @@ impl StorageRuntime for Fake {
                 Operation::Delete { .. } => "delete",
                 Operation::CreateBucket => "create",
                 Operation::Download { .. } => "download",
+                Operation::AccessLink { .. } => "access_link",
                 Operation::ReadObject { .. } => "read_object",
             });
             match self.fail.load(Ordering::SeqCst) {
@@ -868,6 +889,17 @@ impl StorageRuntime for Fake {
                 Operation::Download { key } => Outcome::Download {
                     url: signing::download(&connection, &keys(), &key, chrono::Utc::now())?,
                     expires_at: chrono::Utc::now().timestamp() + 60,
+                },
+                Operation::AccessLink { key, expires_in } => Outcome::Download {
+                    url: signing::access(
+                        &connection,
+                        &keys(),
+                        &key,
+                        chrono::Utc::now(),
+                        expires_in,
+                        false,
+                    )?,
+                    expires_at: chrono::Utc::now().timestamp() + i64::from(expires_in),
                 },
                 Operation::ReadObject { key } => {
                     Outcome::Content(if key.ends_with("fixture.png") {
@@ -1605,6 +1637,193 @@ async fn session_credentials_never_appear_in_a_browser_presigned_url() {
 
 fn managed_allocation() -> Value {
     json!({"request_id":uuid::Uuid::new_v4(),"owner_id":2,"site_id":1,"label":"Alice media","bucket":"alice-media"})
+}
+
+#[tokio::test]
+async fn bucket_access_is_explicit_revision_bound_and_reconciles_unknown_results() {
+    let ctx = Context::new().await;
+    let (status, allocated) = ctx
+        .call(
+            "POST",
+            "/api/v1/storage/managed/buckets",
+            Some("admin"),
+            true,
+            managed_allocation(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{allocated}");
+    let id = allocated["id"].as_str().expect("id");
+    let path = format!("/api/v1/storage/connections/{id}/access");
+    let link = format!("/api/v1/storage/connections/{id}/link");
+    let (_, initial) = ctx
+        .call("GET", &path, Some("alice"), false, json!({}))
+        .await;
+    assert_eq!(initial["visibility"], "private");
+    let key = "photos/foto + café.png";
+    let link_input = json!({"expected_revision":1,"key":key,"expires_in":3600});
+    let (status, signed) = ctx
+        .call("POST", &link, Some("alice"), true, link_input.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{signed}");
+    assert_eq!(signed["kind"], "signed");
+    assert!(
+        signed["url"]
+            .as_str()
+            .expect("url")
+            .contains("X-Amz-Expires=3600")
+    );
+    assert!(
+        signed["url"]
+            .as_str()
+            .expect("url")
+            .contains("response-content-disposition=inline")
+    );
+    let input =
+        json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":1,"visibility":"public"});
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), false, input.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        ctx.call("POST", &path, Some("bob"), true, input.clone())
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    ctx.runtime.managed_fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, input.clone())
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let (_, unknown) = ctx
+        .call("GET", &path, Some("alice"), false, json!({}))
+        .await;
+    assert_eq!(unknown["state"], "unknown");
+    assert_eq!(unknown["visibility"], "private");
+    assert_eq!(unknown["desired_visibility"], "public");
+    assert_eq!(
+        ctx.call("POST", &link, Some("alice"), true, link_input.clone())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let other =
+        json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":2,"visibility":"private"});
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, other).await.0,
+        StatusCode::CONFLICT
+    );
+    ctx.runtime.managed_fail.store(false, Ordering::SeqCst);
+    let (status, public) = ctx
+        .call("POST", &path, Some("alice"), true, input.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{public}");
+    assert_eq!(public["visibility"], "public");
+    assert_eq!(public["revision"], 2);
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, input).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        ctx.runtime
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .filter(|call| **call == "managed_access")
+            .count(),
+        2,
+        "Ready retries must not restart the engine"
+    );
+    let (status, url) = ctx
+        .call("POST", &link, Some("alice"), true, link_input.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{url}");
+    assert_eq!(
+        url["url"],
+        "https://storage.example.test/alice-media/photos/foto%20%2B%20caf%C3%A9.png"
+    );
+    assert!(url["expires_at"].is_null());
+    assert_eq!(url["kind"], "public");
+    let stale =
+        json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":1,"visibility":"private"});
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, stale).await.0,
+        StatusCode::CONFLICT
+    );
+    let revoke =
+        json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":2,"visibility":"private"});
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, revoke).await.1["visibility"],
+        "private"
+    );
+    assert_eq!(
+        ctx.call("POST", &link, Some("alice"), true, link_input)
+            .await
+            .1["kind"],
+        "signed"
+    );
+    for body in [
+        json!({"expected_revision":1,"key":"../secret","expires_in":3600}),
+        json!({"expected_revision":1,"key":"file.txt","expires_in":86401}),
+    ] {
+        assert!(
+            !ctx.call("POST", &link, Some("alice"), true, body)
+                .await
+                .0
+                .is_success()
+        );
+    }
+}
+
+#[tokio::test]
+async fn external_bucket_access_remains_provider_managed_and_read_rules_cover_links() {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    let path = format!("/api/v1/storage/connections/{id}/access");
+    let (_, access) = ctx
+        .call("GET", &path, Some("alice"), false, json!({}))
+        .await;
+    assert_eq!(access["visibility"], "provider");
+    assert_eq!(access["can_change"], false);
+    let body =
+        json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":1,"visibility":"public"});
+    assert_eq!(
+        ctx.call("POST", &path, Some("alice"), true, body).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let rules = policy::Rules {
+        read: false,
+        ..policy::Rules::default()
+    };
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &format!("/api/v1/storage/connections/{id}/policy"),
+            Some("alice"),
+            true,
+            json!({"expected_revision":1,"rules":rules})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        ctx.call(
+            "POST",
+            &format!("/api/v1/storage/connections/{id}/link"),
+            Some("alice"),
+            true,
+            json!({"expected_revision":1,"key":"file.txt","expires_in":3600})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]

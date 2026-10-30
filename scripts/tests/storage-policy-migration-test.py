@@ -19,7 +19,7 @@ RULES = re.search(r'sqlx::query\("(UPDATE storage_policies SET revision=revision
 
 def previous(db):
     base.initialize(db)
-    db.executescript(base.MIGRATION.read_text(encoding="utf-8"))
+    base.migrate_storage(db)
     base.connection(db)
     for path in sorted(MIGRATION.parent.glob("*.sql")):
         if base.MIGRATION.name < path.name < MIGRATION.name:

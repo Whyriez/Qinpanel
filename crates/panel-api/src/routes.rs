@@ -18,6 +18,9 @@ use panel_db::pool::DbPool;
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        crate::storage::access::overview,
+        crate::storage::access::update,
+        crate::storage::access::link,
         crate::storage::managed::status,
         crate::storage::managed::configure,
         crate::storage::tls::overview,
@@ -222,6 +225,8 @@ use panel_db::pool::DbPool;
     ),
     components(
         schemas(
+            crate::storage::access::AccessInput,
+            crate::storage::access::LinkInput,
             crate::storage::managed::ManagedStorageConfiguration,
             crate::storage::tls::StorageMethod,
             crate::storage::tls::Generate,

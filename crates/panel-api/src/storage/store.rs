@@ -93,7 +93,7 @@ pub async fn reserve(
         .await
         .map_err(db_error)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let changed=sqlx::query("INSERT INTO storage_operations(id,connection_id,actor_id,revision,action,state,created_at) SELECT ?,?,?,?,?,'running',? WHERE EXISTS(SELECT 1 FROM storage_connections c JOIN users u ON u.id=c.owner_id WHERE c.id=? AND c.revision=? AND u.role='user' AND u.status='active' AND (?='create_bucket' OR (c.verified_revision=c.revision AND c.verified_at>?))) AND NOT EXISTS(SELECT 1 FROM storage_operations WHERE connection_id=? AND state='running' AND created_at>?)")
+    let changed=sqlx::query("INSERT INTO storage_operations(id,connection_id,actor_id,revision,action,state,created_at) SELECT ?,?,?,?,?,'running',? WHERE EXISTS(SELECT 1 FROM storage_connections c JOIN users u ON u.id=c.owner_id WHERE c.id=? AND c.revision=? AND u.role='user' AND u.status='active' AND NOT EXISTS(SELECT 1 FROM storage_bucket_access a WHERE a.connection_id=c.id AND a.state!='ready') AND (?='create_bucket' OR (c.verified_revision=c.revision AND c.verified_at>?))) AND NOT EXISTS(SELECT 1 FROM storage_operations WHERE connection_id=? AND state='running' AND created_at>?)")
         .bind(&id).bind(&value.id).bind(actor).bind(value.revision).bind(action).bind(now).bind(&value.id).bind(value.revision).bind(action).bind(now-600).bind(&value.id).bind(now-120).execute(pool).await.map_err(db_error)?;
     if changed.rows_affected() != 1 {
         return Err(bad(

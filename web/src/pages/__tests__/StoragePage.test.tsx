@@ -20,7 +20,7 @@ describe('Storage page', () => {
     const connection = { id: 'fixture', bucket: 'media', provider: 'compatible' } as StorageConnection;
     for (const props of [{ admin: true, impersonated: false }, { admin: false, impersonated: true }]) {
       const html = renderToString(<BucketWorkspace {...props} connection={connection} english={false} onBusy={vi.fn()} />);
-      expect(html).toContain('File tenant tetap private');
+      expect(html).toContain('Workspace file milik tenant');
       expect(html).not.toContain('storage-explorer');
       expect(html).not.toContain('type="file"');
     }

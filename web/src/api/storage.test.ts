@@ -1,9 +1,35 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setCsrfToken } from './client';
+import { publicStorageUrl, safeStorageObjectLink, fetchStorageObjectLink, saveStorageAccess } from './storage';
 import { storageAllocationId, fetchStorageTls, generateStorageTls, configureManagedStorage, allocateManagedBucket, issueStorageKey, deleteStorageObject, projectStorageEnvironment, safeDownload, saveStorageConnection, uploadStorageObject, validObjectKey, previewStorageObject, saveStorageRules, saveStorageAllocation, measureStorageUsage, type StoragePolicy, type StorageConnection } from './storage';
 const connection: StorageConnection = { id: 'fixture-connection', owner_id: 2, site_id: 1, label: 'Project media', provider: 'compatible', endpoint: 'https://objects.example.test', region: 'us-east-1', addressing: 'path', bucket: 'project-media', revision: 4, verified_at: 1, has_credentials: true, created_at: 1, updated_at: 1 };
 afterEach(() => { vi.unstubAllGlobals(); setCsrfToken(null); });
 describe('S3 client contracts', () => {
+  it('exposes canonical public URLs and accepts only the selected object origin', () => {
+    const key = 'photos/foto + café.png';
+    const url = publicStorageUrl(connection, key);
+    expect(url).toBe('https://objects.example.test/project-media/photos/foto%20%2B%20caf%C3%A9.png');
+    expect(safeStorageObjectLink({ kind: 'public', url, expires_at: null }, connection, key)).toBe(url);
+    for (const wrong of [url.replace('objects.example.test', 'evil.test'), url.replace('project-media', 'private-media'), `${url}?token=unwanted`, `${url}#fragment`, url.replace('https:', 'http:')]) {
+      expect(() => safeStorageObjectLink({ kind: 'public', url: wrong, expires_at: null }, connection, key)).toThrow();
+    }
+    const signed = { kind: 'signed' as const, url: `${url}?X-Amz-Signature=fixture`, expires_at: Math.floor(Date.now()/1000)+86400 };
+    expect(safeStorageObjectLink(signed, connection, key)).toContain('X-Amz-Signature=fixture');
+    expect(() => safeStorageObjectLink({ ...signed, expires_at: 1 }, connection, key)).toThrow();
+    expect(() => safeStorageObjectLink({ ...signed, expires_at: Math.floor(Date.now()/1000)+86420 }, connection, key)).toThrow();
+    expect(() => publicStorageUrl(connection, '../private')).toThrow();
+  });
+  it('uses separate owner CSRF requests for signed URLs and explicit visibility changes', async () => {
+    const fetch = vi.fn(async () => Response.json({})); vi.stubGlobal('fetch', fetch); setCsrfToken('fixture-csrf');
+    await fetchStorageObjectLink(connection, 'file.zip', 3600);
+    await saveStorageAccess(connection.id, { request_id: 'fixture-request', expected_revision: 2, visibility: 'public' });
+    const calls = fetch.mock.calls as unknown as [string, RequestInit][];
+    expect(calls[0][0]).toContain('/link');
+    expect(JSON.parse(String(calls[0][1].body))).toEqual({ expected_revision: 4, key: 'file.zip', expires_in: 3600 });
+    expect(calls[1][0]).toContain('/access');
+    expect(JSON.parse(String(calls[1][1].body)).visibility).toBe('public');
+    for (const [, options] of calls) expect(new Headers(options.headers).get('X-CSRF-Token')).toBe('fixture-csrf');
+  });
   it('fetches private previews only through the authenticated same-origin proxy', async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(new Uint8Array([137, 80, 78, 71]), { headers: { 'Content-Type': 'image/png' } })); vi.stubGlobal('fetch', fetch);
     const signal = new AbortController().signal;
