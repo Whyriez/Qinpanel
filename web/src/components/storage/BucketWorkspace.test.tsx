@@ -2,12 +2,18 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { AllocationEditor, BucketPolicy, RulesEditor, storageBytes } from './BucketPolicy';
 import { ObjectDetail } from './ObjectExplorer';
-import { AccessEditor } from './BucketAccess';
+import { AccessEditor, OwnerBucketWorkspace } from './BucketAccess';
 import type { StorageConnection, StoragePolicy } from '../../api/storage';
 
 const policy: StoragePolicy = { revision: 1, quota_bytes: 1073741824, used_bytes: null, object_count: null, measured_at: null, visibility: 'owner', enforcement: 'panel', rules: { read: true, write: true, delete: true, max_file_bytes: 33554432, extensions: [] } };
 const connection = { id: 'fixture', bucket: 'media', managed: true } as StorageConnection;
 describe('Bucket workspace', () => {
+  it('opens on files and keeps connection tools behind their own tab', () => {
+    const html = renderToString(<OwnerBucketWorkspace connection={connection} english={false} onBusy={vi.fn()} connectionTools={<div>fixture connection configuration</div>} />);
+    expect(html).toContain('aria-label="File browser"'); expect(html).toContain('<h2>media</h2>');
+    expect(html).toContain('Koneksi S3'); expect(html).toContain('role="tabpanel"');
+    expect(html).toContain('storage-file-skeleton'); expect(html).not.toContain('fixture connection configuration');
+  });
   it('does not label every bucket private in the transfer rules section', () => {
     const html = renderToString(<BucketPolicy connection={connection} admin={false} english={false} locked={false} />);
     expect(html).toContain('Rules transfer panel');

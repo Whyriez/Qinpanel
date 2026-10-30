@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Globe2, LockKeyhole, RefreshCw, Settings2, FolderOpen } from 'lucide-react';
+import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
+import { Cylinder, Globe2, LockKeyhole, RefreshCw, Settings2, FolderOpen, Plug } from 'lucide-react';
 import { fetchStorageAccess, saveStorageAccess, storageAllocationId, type StorageAccess, type StorageConnection } from '../../api/storage';
 import { ObjectExplorer } from './ObjectExplorer';
 import { BucketPolicy } from './BucketPolicy';
 
-export function OwnerBucketWorkspace({ connection, english, onBusy }: { connection: StorageConnection; english: boolean; onBusy: (busy: boolean) => void }) {
+export function OwnerBucketWorkspace({ connection, english, onBusy, connectionTools }: { connection: StorageConnection; english: boolean; onBusy: (busy: boolean) => void; connectionTools?: ReactNode }) {
   const t = (id: string, en: string) => english ? en : id;
+  const workspaceId = useId();
   const [access, setAccess] = useState<StorageAccess | null>(null); const [error, setError] = useState(''); const [refresh, setRefresh] = useState(0);
-  const [tab, setTab] = useState<'files' | 'settings'>('files'); const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState<'files' | 'settings' | 'connection'>('files'); const [busy, setBusy] = useState(false);
   const reportBusy = useCallback((value: boolean) => { setBusy(value); onBusy(value); }, [onBusy]);
   useEffect(() => { const controller = new AbortController(); fetchStorageAccess(connection.id, controller.signal).then(value => { if (!controller.signal.aborted) { setAccess(value); setError(''); } }).catch(error => { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : 'Storage access unavailable'); }); return () => controller.abort(); }, [connection.id, refresh]);
   useEffect(() => {
@@ -16,11 +17,17 @@ export function OwnerBucketWorkspace({ connection, english, onBusy }: { connecti
     return () => window.clearInterval(timer);
   }, [access?.state]);
   const label = !access ? t('Memuat akses…', 'Loading access…') : access.state !== 'ready' ? t('Perlu sinkronisasi', 'Needs reconciliation') : access.visibility === 'public' ? 'Public' : access.visibility === 'private' ? 'Private' : t('Diatur provider', 'Provider managed');
-  return <section className="storage-owner-workspace">
-    <div className="storage-workspace-heading"><div><span className="storage-eyebrow">Storage / {connection.bucket}</span><h2>{t('File browser', 'File browser')}</h2></div><button type="button" className={`storage-access-badge ${access?.visibility === 'public' ? 'is-public' : ''}`} disabled={busy} onClick={() => setTab('settings')}>{access?.visibility === 'public' ? <Globe2 size={14} /> : <LockKeyhole size={14} />}{label}<Settings2 size={13} /></button></div>
-    <div className="storage-workspace-tabs" role="tablist" aria-label={t('Workspace bucket', 'Bucket workspace')}><button type="button" role="tab" aria-selected={tab === 'files'} disabled={busy} onClick={() => setTab('files')}><FolderOpen size={15} />{t('File', 'Files')}</button><button type="button" role="tab" aria-selected={tab === 'settings'} disabled={busy} onClick={() => setTab('settings')}><Settings2 size={15} />{t('Pengaturan bucket', 'Bucket settings')}</button></div>
+  return <section className="storage-owner-workspace" aria-label={t('File browser', 'File browser')}>
+    <div className="storage-workspace-heading"><div className="storage-bucket-identity"><span className="storage-bucket-symbol"><Cylinder size={21} /></span><div><h2>{connection.bucket}</h2><p>{connection.label}<span> · </span>{connection.managed ? t('Disk server', 'Server disk') : t('Storage eksternal', 'External storage')}</p></div></div><button type="button" className={`storage-access-badge ${access?.visibility === 'public' ? 'is-public' : ''}`} disabled={busy} onClick={() => setTab('settings')}>{access?.visibility === 'public' ? <Globe2 size={14} /> : <LockKeyhole size={14} />}{label}<Settings2 size={13} /></button></div>
+    <div className="storage-workspace-tabs" role="tablist" aria-label={t('Workspace bucket', 'Bucket workspace')} onKeyDown={event => {
+      if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+      const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)'));
+      const index = tabs.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length-1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      event.preventDefault(); tabs[next]?.focus(); tabs[next]?.click();
+    }}><button id={`${workspaceId}-files`} aria-controls={`${workspaceId}-panel`} type="button" role="tab" aria-selected={tab === 'files'} tabIndex={tab === 'files' ? 0 : -1} disabled={busy} onClick={() => setTab('files')}><FolderOpen size={15} />{t('File', 'Files')}</button><button id={`${workspaceId}-settings`} aria-controls={`${workspaceId}-panel`} type="button" role="tab" aria-selected={tab === 'settings'} tabIndex={tab === 'settings' ? 0 : -1} disabled={busy} onClick={() => setTab('settings')}><Settings2 size={15} />{t('Pengaturan bucket', 'Bucket settings')}</button>{connectionTools && <button id={`${workspaceId}-connection`} aria-controls={`${workspaceId}-panel`} type="button" role="tab" aria-selected={tab === 'connection'} tabIndex={tab === 'connection' ? 0 : -1} disabled={busy} onClick={() => setTab('connection')}><Plug size={15} />{t('Koneksi S3', 'S3 connection')}</button>}</div>
     {error && <p className="storage-error" role="alert">{error}<button type="button" onClick={() => setRefresh(v => v+1)}><RefreshCw size={14} />{t('Coba lagi', 'Retry')}</button></p>}
-    {tab === 'files' ? <ObjectExplorer connection={connection} english={english} access={access} onBusy={reportBusy} /> : <div className="storage-bucket-settings">{access && <AccessEditor key={`${access.revision}:${access.state}`} connection={connection} access={access} english={english} onChanged={setAccess} onBusy={reportBusy} />}<BucketPolicy connection={connection} admin={false} english={english} locked={busy} /></div>}
+    <div id={`${workspaceId}-panel`} role="tabpanel" aria-labelledby={`${workspaceId}-${tab === 'settings' ? 'settings' : tab === 'connection' ? 'connection' : 'files'}`}>{tab === 'files' ? <ObjectExplorer connection={connection} english={english} access={access} onBusy={reportBusy} /> : tab === 'connection' ? <div className="storage-connection-panel">{connectionTools}</div> : <div className="storage-bucket-settings">{access && <AccessEditor key={`${access.revision}:${access.state}`} connection={connection} access={access} english={english} onChanged={setAccess} onBusy={reportBusy} />}<BucketPolicy connection={connection} admin={false} english={english} locked={busy} /></div>}</div>
   </section>;
 }
 

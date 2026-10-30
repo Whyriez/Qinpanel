@@ -6,14 +6,25 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const base = process.env.QPANEL_UI_URL || 'http://127.0.0.1:5206';
 const output = path.join(__dirname, '../artifacts/storage-workspace');
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aTmcAAAAASUVORK5CYII=', 'base64');
+let png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aTmcAAAAASUVORK5CYII=', 'base64');
 (async () => {
   await fs.mkdir(output, { recursive: true });
   const browser = await chromium.launch({ channel: process.env.QPANEL_BROWSER_CHANNEL || 'msedge', headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, permissions: ['clipboard-read', 'clipboard-write'] });
   const page = await context.newPage();
-  const errors = [], missing = [], mutations = [];
-  let checks = 0, failAccess = false, role = 'user', impersonated = false;
+  const thumbnail = await page.evaluate(() => {
+    const canvas = document.createElement('canvas'); canvas.width=640; canvas.height=420;
+    const ctx=canvas.getContext('2d');
+    const sky=ctx.createLinearGradient(0,0,0,420); sky.addColorStop(0,'#bfd7dd'); sky.addColorStop(1,'#edf1e7'); ctx.fillStyle=sky; ctx.fillRect(0,0,640,420);
+    ctx.fillStyle='#f5eee0'; ctx.beginPath();ctx.arc(452,104,38,0,Math.PI*2);ctx.fill();
+    for (const [color,points] of [['#89aaa2',[[0,280],[135,120],[275,280],[415,168],[640,300]]],['#446d68',[[0,350],[180,220],[330,320],[520,210],[640,300]]],['#234c49',[[0,360],[190,300],[390,365],[640,315]]]]) {
+      ctx.fillStyle=color;ctx.beginPath();ctx.moveTo(0,420);for(const [x,y] of points)ctx.lineTo(x,y);ctx.lineTo(640,420);ctx.closePath();ctx.fill();
+    }
+    return canvas.toDataURL('image/png').split(',')[1];
+  });
+  png=Buffer.from(thumbnail,'base64');
+  const errors = [], missing = [], mutations = [], listingRequests = [];
+  let checks = 0, failAccess = false, failDelete = false, role = 'user', impersonated = false;
   const check = (value, label) => { assert.ok(value, label); console.log(`ok ${++checks}: ${label}`); };
   const connection = { id: '7c03851f-60dd-49d1-a3aa-a2100320e7c9', owner_id: 2, site_id: 1, label: 'Media project', provider: 'compatible', endpoint: 'https://storage.example.test', region: 'us-east-1', addressing: 'path', bucket: 'alice-media', revision: 1, verified_at: 1, has_credentials: true, managed: true, managed_state: 'ready', application_key_generation: 1, application_key_state: 'ready', created_at: 1, updated_at: 1 };
   let access = { revision: 1, visibility: 'private', desired_visibility: 'private', state: 'ready', request_id: null, can_change: true };
@@ -48,6 +59,13 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
       } else if (p.endsWith('/link')) {
         const data = req.postDataJSON(); mutations.push(data);
         body = { kind: 'signed', url: `https://storage.example.test/alice-media/${data.key.split('/').map(encodeURIComponent).join('/')}?X-Amz-Signature=fixture`, expires_at: Math.floor(Date.now()/1000)+data.expires_in };
+      } else if (p.endsWith('/delete')) {
+        const data = req.postDataJSON(); mutations.push({ delete: data.key });
+        assert.equal(data.confirmation, data.key);
+        const index = objects.findIndex(object => object.key === data.key);
+        assert.ok(index >= 0, 'Delete must address the exact listed key');
+        if (failDelete) { code = 503; body = { error: 'Provider menerima permintaan hapus, tetapi file belum dipastikan hilang. Muat ulang daftar sebelum mencoba kembali.' }; }
+        else { objects.splice(index, 1); body = { success: true }; }
       } else if (p.endsWith('/download')) {
         const data = req.postDataJSON(), expires_at = Math.floor(Date.now()/1000)+60;
         body = { url: `${p}?expected_revision=1&key=${encodeURIComponent(data.key)}&expires_at=${expires_at}`, expires_at };
@@ -57,7 +75,13 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     else if (p === '/api/v1/storage/context') body = { owners: [{ id: 2, username: 'alice' }], sites: [{ id: 1, owner_id: 2, domain: 'project.example.test' }], upload_limit_bytes: 33554432 };
     else if (p === '/api/v1/storage/connections') body = { connections: [connection], upload_limit_bytes: 33554432 };
     else if (p.endsWith('/access')) body = access;
-    else if (p.endsWith('/objects')) body = { listing: { objects, prefixes: [], next_token: null } };
+    else if (p.endsWith('/objects')) {
+      const prefix = url.searchParams.get('prefix') ?? ''; listingRequests.push(prefix);
+      const matches = objects.filter(object => object.key.startsWith(prefix));
+      const files = matches.filter(object => !object.key.slice(prefix.length).includes('/'));
+      const prefixes = [...new Set(matches.filter(object => object.key.slice(prefix.length).includes('/')).map(object => prefix + object.key.slice(prefix.length).split('/')[0] + '/'))];
+      body = { listing: { objects: files, prefixes, next_token: null } };
+    }
     else if (p.endsWith('/policy')) body = { revision: 1, quota_bytes: 1073741824, used_bytes: 12400, object_count: objects.length, measured_at: 1, rules: { read: true, write: true, delete: true, max_file_bytes: 33554432, extensions: [] }, enforcement: 'panel', visibility: 'owner' };
     else if (p.endsWith('/download')) {
       if (!url.searchParams.has('preview')) { await route.continue(); return; }
@@ -73,7 +97,28 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
   try {
     await new Promise((resolve, reject) => { downloadFixture.once('error', reject); downloadFixture.listen(7700, '127.0.0.1', resolve); });
     await page.goto(`${base}/storage`);
-    await page.getByRole('heading', { name: 'File browser', exact: true }).waitFor();
+    await page.getByRole('region', { name: 'File browser', exact: true }).waitFor();
+    await page.getByRole('button', { name: /archive.zip/ }).waitFor();
+    check(await page.getByRole('button', { name: 'Tampilan grid', exact: true }).getAttribute('aria-pressed') === 'true', 'workspace opens in image-friendly grid view');
+    check(await page.getByRole('button', { name: 'Uji koneksi', exact: true }).count() === 0, 'connection configuration does not crowd the file workspace');
+    await page.getByLabel('Cari bucket',{exact:true}).fill('missing-bucket');
+    check(await page.getByText('Bucket tidak ditemukan.',{exact:true}).isVisible(), 'bucket search gives an explicit no-match state');
+    await page.getByLabel('Cari bucket',{exact:true}).fill('alice');
+    check(await page.locator('.storage-bucket-nav-list .storage-connection').count()===1, 'bucket search preserves matching navigation');
+    await page.getByLabel('Cari bucket',{exact:true}).fill('');
+    await page.getByRole('tab', { name: 'File', exact: true }).focus(); await page.keyboard.press('End');
+    check(await page.getByRole('button', { name: 'Uji koneksi', exact: true }).isVisible(), 'keyboard navigation reaches the separate connection tab');
+    await page.keyboard.press('Home');
+    await page.getByLabel('Jenis file di halaman ini', { exact: true }).selectOption('image');
+    check(await page.locator('.storage-file-list > li').count() === 1, 'file type filter shows images only on the active page');
+    await page.getByLabel('Jenis file di halaman ini', { exact: true }).selectOption('all');
+    await page.getByLabel('Urutkan file di halaman ini', { exact: true }).selectOption('size');
+    check((await page.locator('.storage-file-list > li').first().textContent()).includes([...objects].sort((a,b)=>b.size-a.size)[0].key), 'size sort puts the largest file first');
+    await page.getByLabel('Urutkan file di halaman ini', { exact: true }).selectOption('name');
+    await page.getByRole('button', { name: 'Tampilan daftar', exact: true }).click();
+    check(await page.locator('.storage-list-heading').isVisible(), 'list view presents aligned file metadata columns');
+    await page.getByRole('button', { name: 'Tampilan grid', exact: true }).click();
+    await page.screenshot({ path: path.join(output, 'workspace-overview.png'), fullPage: true });
     await page.getByRole('button', { name: /photo \+ café.png/ }).click();
     const detail = page.getByRole('complementary', { name: 'Detail file', exact: true });
     await detail.locator('.storage-preview img').waitFor();
@@ -104,7 +149,7 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     check(await detail.getByLabel('URL publik', { exact: true }).inputValue() === 'https://storage.example.test/alice-media/photo%20%2B%20caf%C3%A9.png', 'Public URL is canonical, permanent, and has no signature');
     check(await detail.getByRole('button', { name: 'Dapatkan URL', exact: true }).count() === 0, 'public detail exposes URL without minting a download');
     check(await page.locator('.storage-file-thumbnail img').count() > 0, 'grid shows image thumbnails');
-    await page.getByRole('heading', { name: 'File browser', exact: true }).scrollIntoViewIfNeeded();
+    await page.getByRole('region', { name: 'File browser', exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(output, 'file-workspace.png') });
     for (const theme of ['light', 'dark']) {
       await page.evaluate(theme => document.documentElement.classList.toggle('dark', theme === 'dark'), theme);
@@ -114,17 +159,81 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
         await detail.scrollIntoViewIfNeeded();
         check((await detail.boundingBox()).width <= width, `${theme} ${width}: file details fit`);
         if (width !== 375) await page.screenshot({ path: path.join(output, `${theme}-${width}.png`), fullPage: true });
+          if (theme === 'dark' && width === 320) {
+            const drawer=page.getByRole('dialog',{name:'Detail file',exact:true});
+            check(await drawer.isVisible(), 'small-screen file details use a focused drawer');
+            await page.keyboard.press('Shift+Tab');
+            check(await page.evaluate(()=>!!document.activeElement?.closest('.storage-detail-overlay')), 'drawer keeps keyboard focus inside its controls');
+            await page.keyboard.press('Escape'); await drawer.waitFor({state:'hidden'});
+            check(await page.evaluate(()=>document.activeElement?.classList.contains('storage-file-row')), 'Escape closes details and restores focus to the file');
+            await page.getByRole('heading',{name:'Storage S3',exact:true}).scrollIntoViewIfNeeded();
+            await page.screenshot({path:path.join(output,'mobile-workspace.png'),fullPage:true});
+            await page.getByRole('button',{name:/photo \+ café.png/}).click();
+          }
       }
     }
     await page.setViewportSize({ width: 1440, height: 1000 });
     await detail.getByRole('button', { name: 'Tutup detail file', exact: true }).click();
     await page.getByRole('button', { name: 'Upload file', exact: true }).click();
+    const uploadDialog=page.getByRole('dialog',{name:'Upload ke bucket',exact:true});
+    check(await uploadDialog.isVisible(), 'upload has a focused dialog instead of pushing the file list down');
+    const transfer=await page.evaluateHandle(()=>{const data=new DataTransfer();data.items.add(new File(['fixture archive'],'dragged.zip',{type:'application/zip'}));return data;});
+    await uploadDialog.locator('.storage-file-picker').dispatchEvent('drop',{dataTransfer:transfer});
+    check(await uploadDialog.getByLabel('Object key',{exact:true}).inputValue()==='dragged.zip', 'drop target selects a real file and preserves its name');
     check(await page.locator('input[type=file]').getAttribute('accept') === null, 'upload allows arbitrary file formats');
     await page.locator('input[type=file]').setInputFiles({ name: 'video.mp4', mimeType: 'video/mp4', buffer: Buffer.from('fixture video') });
+    await page.waitForFunction(()=>{const panel=document.querySelector('.storage-upload-card');return panel && getComputedStyle(panel).opacity==='1';});
+    await page.screenshot({path:path.join(output,'upload-dialog.png')});
+    await page.setViewportSize({width:320,height:700});
+    check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1), 'upload dialog fits a 320px screen without horizontal overflow');
+    const uploadBounds=await uploadDialog.locator('.dialog-panel').boundingBox();
+    check(uploadBounds.x>=0 && uploadBounds.x+uploadBounds.width<=321 && uploadBounds.y>=0 && uploadBounds.y+uploadBounds.height<=701, 'upload dialog stays inside the small-screen viewport');
+    await page.screenshot({path:path.join(output,'mobile-upload.png')});
+    await page.setViewportSize({width:1440,height:1000});
     await page.getByRole('checkbox', { name: /Izinkan menimpa/ }).check();
     await page.getByRole('button', { name: 'Mulai upload', exact: true }).click();
     await page.getByRole('button', { name: /video.mp4/ }).waitFor();
     check(mutations.some(item => item.upload === 'video.mp4'), 'non-image files use the same storage upload flow');
+    check(listingRequests.at(-1) === '', 'upload returns to the containing folder instead of a filename prefix');
+    check(await page.getByRole('button', { name: 'Ke atas', exact: true }).count() === 0, 'root upload does not create a fake folder level');
+    await detail.getByRole('button', { name: 'Tutup detail file', exact: true }).click();
+    const uploadedName = 'WhatsApp Image 2026-10-02 at 20.58.22.jpeg';
+    const uploadedKey = `folder space/${uploadedName}`;
+    await page.getByRole('button', { name: 'Upload file', exact: true }).click();
+    await page.locator('input[type=file]').setInputFiles({ name: uploadedName, mimeType: 'image/jpeg', buffer: png });
+    await page.getByLabel('Object key', { exact: true }).fill(uploadedKey);
+    await page.getByRole('checkbox', { name: /Izinkan menimpa/ }).check();
+    await page.getByRole('button', { name: 'Mulai upload', exact: true }).click();
+    await detail.getByLabel('URL publik', { exact: true }).waitFor();
+    const uploadedUrl = await detail.getByLabel('URL publik', { exact: true }).inputValue();
+    check(uploadedUrl.endsWith('/folder%20space/WhatsApp%20Image%202026-10-02%20at%2020.58.22.jpeg'), 'upload detail preserves the exact filename spaces');
+    check(listingRequests.at(-1) === 'folder space/', 'nested upload lists its folder, not its filename');
+    check(await page.getByRole('alert').count() === 0, 'successful upload and folder refresh do not show Request failed');
+    await detail.getByRole('button', { name: 'Tutup detail file', exact: true }).click();
+    await page.getByRole('button', { name: 'Ke atas', exact: true }).click();
+    await page.getByLabel('Jenis file di halaman ini',{exact:true}).selectOption('image');
+    check(await page.getByRole('button', { name: 'folder space Folder', exact: true }).isVisible(), 'image filtering keeps folders available for navigation');
+    await page.getByRole('button', { name: 'folder space Folder', exact: true }).click();
+    await page.getByRole('button', { name: new RegExp(uploadedName.replaceAll('.', '\\.')) }).click();
+    check(await detail.getByLabel('URL publik', { exact: true }).inputValue() === uploadedUrl, 'URL remains identical after navigating up and reopening the listed image');
+    failDelete = true;
+    await detail.getByRole('button', { name: 'Hapus file', exact: true }).click();
+    let danger = page.getByRole('dialog', { name: 'Hapus file?', exact: true });
+    await danger.getByRole('textbox').fill(uploadedKey);
+    await danger.getByRole('button', { name: 'Hapus file', exact: true }).click();
+    await page.getByRole('alert').getByText(/belum dipastikan hilang/).waitFor();
+    check(await page.getByText('File berhasil dihapus.', { exact: true }).count() === 0, 'unconfirmed deletion never shows a success message');
+    check(objects.some(object => object.key === uploadedKey), 'unconfirmed delete retains the object for readback');
+    await danger.getByRole('button', { name: 'Batal', exact: true }).click();
+    await page.getByRole('button', { name: 'Muat ulang file', exact: true }).click(); failDelete = false;
+    await detail.getByRole('button', { name: 'Hapus file', exact: true }).click();
+    danger = page.getByRole('dialog', { name: 'Hapus file?', exact: true });
+    await danger.getByRole('textbox').fill(uploadedKey);
+    await danger.getByRole('button', { name: 'Hapus file', exact: true }).click();
+    await page.getByText('File berhasil dihapus.', { exact: true }).waitFor();
+    await page.getByRole('button', { name: new RegExp(uploadedName.replaceAll('.', '\\.')) }).waitFor({ state: 'hidden' });
+    check(!objects.some(object => object.key === uploadedKey), 'confirmed deletion removes the exact spaced key from storage and the listing');
+    check(mutations.filter(item => item.delete).every(item => item.delete === uploadedKey), 'delete requests never substitute plus signs for spaces');
     await page.getByRole('tab', { name: 'Pengaturan bucket', exact: true }).click();
     await editor.getByRole('radio', { name: /^Private/ }).check(); failAccess = true;
     await editor.getByRole('button', { name: 'Simpan akses bucket', exact: true }).click();
@@ -136,10 +245,10 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
     check(access.request_id === requestId && access.visibility === 'private', 'reconciliation resumes the same request');
     impersonated = true; await page.reload();
     await page.getByRole('heading', { name: 'Workspace file milik tenant', exact: true }).waitFor();
-    check(await page.getByRole('heading', { name: 'File browser', exact: true }).count() === 0, 'impersonated session has no file workspace');
+    check(await page.getByRole('region', { name: 'File browser', exact: true }).count() === 0, 'impersonated session has no file workspace');
     impersonated = false; role = 'admin'; await page.reload();
     await page.getByRole('heading', { name: 'Workspace file milik tenant', exact: true }).waitFor();
-    check(await page.getByRole('heading', { name: 'File browser', exact: true }).count() === 0, 'admin retains only allocation and metadata controls');
+    check(await page.getByRole('region', { name: 'File browser', exact: true }).count() === 0, 'admin retains only allocation and metadata controls');
     check(errors.length === 0, `no browser errors: ${errors.join(', ')}`);
     check(missing.length === 0, `all requests handled by fixtures: ${missing.join(', ')}`);
     console.log(`${checks} storage workspace UI checks passed.`);

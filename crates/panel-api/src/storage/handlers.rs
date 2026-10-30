@@ -444,10 +444,39 @@ async fn mutate(
         return Err(error);
     }
 
+    let deleted_key = match &operation {
+        Operation::Delete { key } => Some(key.clone()),
+        _ => None,
+    };
     let result = services
         .runtime
-        .execute(connection.clone(), keys, operation, origin)
+        .execute(connection.clone(), keys.clone(), operation, origin.clone())
         .await;
+    let result = if result.is_ok() {
+        if let Some(key) = deleted_key {
+            // S3 DELETE may return 204 for a nonexistent key. Confirm this exact
+            // key is absent while the mutation lease is still held. Never retry
+            // a different spelling or normalize a caller's key before deletion.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                services.runtime.execute(
+                    connection.clone(),
+                    keys,
+                    Operation::HeadObject { key },
+                    origin,
+                ),
+            )
+            .await
+            {
+                Ok(Err(Failure::Provider(404))) => Ok(Outcome::Done),
+                _ => Err(Failure::DeleteUnconfirmed),
+            }
+        } else {
+            result
+        }
+    } else {
+        result
+    };
     store::finish(&state.pool, &id, &result).await?;
     log(
         state,

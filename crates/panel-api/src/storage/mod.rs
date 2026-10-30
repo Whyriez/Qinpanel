@@ -38,6 +38,10 @@ pub fn db_error(_: impl Sized) -> Error {
 }
 pub fn failure(error: Failure) -> Error {
     match error {
+        Failure::DeleteUnconfirmed => bad(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Provider menerima permintaan hapus, tetapi file belum dipastikan hilang. Muat ulang daftar sebelum mencoba kembali.",
+        ),
         Failure::ConditionalUnsupported => bad(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Provider belum terverifikasi mendukung pencegahan overwrite. Pilih object key unik dan setujui PUT yang dapat menimpa, atau gunakan AWS S3/R2.",

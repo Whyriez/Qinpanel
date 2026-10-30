@@ -264,7 +264,7 @@ where
     }
     let status = response.status().as_u16();
     let complete = match method {
-        hyper::Method::GET => status == 200,
+        hyper::Method::GET | hyper::Method::HEAD => status == 200,
         hyper::Method::PUT => matches!(status, 200 | 201 | 204),
         hyper::Method::DELETE => matches!(status, 200 | 204),
         _ => false,
@@ -328,6 +328,16 @@ fn prepare(connection: &Connection, operation: &Operation) -> Result<Prepared, F
             super::domain::key(key)?;
             Ok((
                 "GET",
+                signing::path(connection, Some(key)),
+                String::new(),
+                Bytes::new(),
+                true,
+            ))
+        }
+        Operation::HeadObject { key } => {
+            super::domain::key(key)?;
+            Ok((
+                "HEAD",
                 signing::path(connection, Some(key)),
                 String::new(),
                 Bytes::new(),
@@ -439,7 +449,10 @@ pub fn parse_listing(body: &[u8], requested_prefix: &str) -> Result<Listing, Fai
     }
     let decode = |value: &str| -> Result<String, Failure> {
         let value = if xml.encoding_type.as_deref() == Some("url") {
-            signing::decode(value)?
+            // ListObjects encoding-type=url uses query escaping on providers
+            // such as SeaweedFS: raw '+' means space; '%2B' is a literal plus.
+            // Decode once here only. SigV4 paths and opaque tokens stay intact.
+            signing::decode(&value.replace('+', " "))?
         } else {
             value.into()
         };
@@ -481,13 +494,23 @@ mod wire_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     async fn http(status: &str, body: &[u8], limit: usize) -> Result<Bytes, Failure> {
+        http_method(hyper::Method::GET, status, body, limit).await
+    }
+    async fn http_method(
+        method: hyper::Method,
+        status: &str,
+        body: &[u8],
+        limit: usize,
+    ) -> Result<Bytes, Failure> {
         let (client, mut server) = tokio::io::duplex(4096);
         let mut response = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         )
         .into_bytes();
-        response.extend_from_slice(body);
+        if method != hyper::Method::HEAD {
+            response.extend_from_slice(body);
+        }
         tokio::spawn(async move {
             let mut request = [0u8; 4096];
             let _ = server.read(&mut request).await;
@@ -496,6 +519,7 @@ mod wire_tests {
         exchange(
             client,
             Request::builder()
+                .method(method)
                 .uri("/")
                 .header("host", "fixture.test")
                 .body(Full::new(Bytes::new()))
@@ -503,6 +527,38 @@ mod wire_tests {
             limit,
         )
         .await
+    }
+    #[test]
+    fn delete_and_head_prepare_the_same_exact_object_path() {
+        let connection = crate::storage::tests::connection();
+        let key = "photos/WhatsApp Image+original %2B.jpeg";
+        let delete = prepare(&connection, &Operation::Delete { key: key.into() }).expect("DELETE");
+        let head = prepare(&connection, &Operation::HeadObject { key: key.into() }).expect("HEAD");
+        assert_eq!((delete.0, head.0), ("DELETE", "HEAD"));
+        assert_eq!(delete.1, head.1);
+        assert_eq!(
+            head.1,
+            "/project-media/photos/WhatsApp%20Image%2Boriginal%20%252B.jpeg"
+        );
+        assert!(head.2.is_empty());
+        assert!(head.3.is_empty());
+    }
+    #[tokio::test]
+    async fn head_accepts_existing_objects_and_reports_not_found_for_delete_verification() {
+        assert!(
+            http_method(hyper::Method::HEAD, "200 OK", b"fixture object metadata", 1)
+                .await
+                .expect("HEAD")
+                .is_empty()
+        );
+        assert!(matches!(
+            http_method(hyper::Method::HEAD, "404 Not Found", b"", 1024).await,
+            Err(Failure::Provider(404))
+        ));
+        assert!(matches!(
+            http_method(hyper::Method::HEAD, "403 Forbidden", b"", 1024).await,
+            Err(Failure::Provider(403))
+        ));
     }
     #[tokio::test]
     async fn bounded_http_does_not_follow_redirects_or_expose_error_body() {

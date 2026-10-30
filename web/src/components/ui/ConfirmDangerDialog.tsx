@@ -8,6 +8,7 @@ export interface ConfirmDangerDialogProps {
   onConfirm: (purgeFiles?: boolean) => void;
   title: string;
   description: string;
+  errorMessage?: string;
   confirmMatchText: string;
   confirmButtonLabel?: string;
   hasPurgeOption?: boolean;
@@ -21,6 +22,7 @@ export const ConfirmDangerDialog: React.FC<ConfirmDangerDialogProps> = ({
   onConfirm,
   title,
   description,
+  errorMessage,
   confirmMatchText,
   confirmButtonLabel = 'Konfirmasi Penghapusan',
   hasPurgeOption = false,
@@ -89,6 +91,7 @@ export const ConfirmDangerDialog: React.FC<ConfirmDangerDialogProps> = ({
           <div className="text-xs text-[var(--ink-muted)] leading-relaxed mb-4 bg-[var(--raised)] p-3 rounded-[var(--radius-sm)] border border-[var(--line)]">
             {description}
           </div>
+          {errorMessage && <p role="alert" className="text-xs text-[var(--danger)] leading-relaxed mb-4">{errorMessage}</p>}
 
           {/* Input Confirmation */}
           <div className="mb-4">

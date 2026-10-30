@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST = "storage.qonpanel.test"
@@ -131,6 +132,34 @@ def wait_for_http01(expected, timeout=30):
     raise AssertionError("HTTP-01 challenge did not become ready within the deadline. " + reason)
 
 
+def exercise_listed_object_keys(keys, tunnel=False):
+    """Actual S3 list -> decode -> GET/DELETE/HEAD, with distinct collision keys."""
+    prefix = "key-roundtrip/"
+    names = ["WhatsApp Image 2026-10-02 at 20.58.22.jpeg", "WhatsApp+Image+2026-10-02+at+20.58.22.jpeg", "foto + café %2B.txt"]
+    paths, expected = {}, {}
+    for index, name in enumerate(names):
+        key = prefix + name
+        paths[key] = "/alice-media/" + urllib.parse.quote(key, safe="/-_.~")
+        expected[key] = f"roundtrip-{index}".encode()
+        assert request("PUT", paths[key], keys, expected[key], tunnel=tunnel)[0] in (200,201)
+    query = urllib.parse.urlencode({"list-type":"2", "encoding-type":"url", "prefix":prefix, "delimiter":"/"})
+    status, body = request("GET", "/alice-media?" + query, keys, tunnel=tunnel)
+    assert status == 200
+    tree = ET.fromstring(body)
+    ns = {"s3":"http://s3.amazonaws.com/doc/2006-03-01/"}
+    assert tree.findtext("s3:EncodingType", namespaces=ns) == "url"
+    listed = [urllib.parse.unquote_plus(element.text) for element in tree.findall("s3:Contents/s3:Key", ns)]
+    assert set(listed) == set(paths), "List encoding must preserve spaces, literal plus, Unicode and literal percent exactly once"
+    for index, key in enumerate(listed):
+        path = "/alice-media/" + urllib.parse.quote(key, safe="/-_.~")
+        assert request("GET", path, keys, tunnel=tunnel) == (200, expected[key])
+        assert request("DELETE", path, keys, tunnel=tunnel)[0] in (200,204)
+        assert request("HEAD", path, keys, tunnel=tunnel)[0] == 404
+        assert request("GET", path, keys, tunnel=tunnel)[0] == 404
+        for remaining in listed[index+1:]:
+            assert request("GET", paths[remaining], keys, tunnel=tunnel)[0] == 200, "Deleting a spaced filename must not delete the separate literal-plus filename"
+
+
 def main():
     if os.environ.get("QONPANEL_DISPOSABLE_CI") != "1" or os.environ.get("GITHUB_ACTIONS") != "true" or sys.platform != "linux" or os.geteuid() != 0:
         raise SystemExit("Only an explicitly authorized disposable GitHub Linux VM may run this test.")
@@ -170,6 +199,7 @@ def main():
                 assert control(allocation)["ready"]  # idempotent native bucket reconciliation
                 assert control({**allocation, "action": "application_key", "generation": 1, "credentials": json.dumps(application)})["ready"]
             assert request("GET", "/alice-media?list-type=2", alice)[0] == 200
+            exercise_listed_object_keys(alice)
             assert request("PUT", "/alice-media/nested/hello%20world.txt", alice, b"Qinpanel native S3 fixture")[0] in (200, 201)
             assert request("GET", "/alice-media/nested/hello%20world.txt", alice) == (200, b"Qinpanel native S3 fixture")
             signed = presigned_get("/alice-media/nested/hello%20world.txt", alice)
@@ -225,6 +255,7 @@ def main():
             after = json.loads(Path("/etc/qonpanel-storage/state.json").read_bytes())
             assert after["root"] == json.loads(before)["root"] and after["buckets"] == json.loads(before)["buckets"]
             object_path = "/alice-media/nested/hello%20world.txt"
+            exercise_listed_object_keys(rotated, tunnel=True)
             assert request("GET", object_path, rotated, tunnel=True) == (200, b"Qinpanel native S3 fixture")
             assert request("GET", presigned_get(object_path, rotated), tunnel=True) == (200, b"Qinpanel native S3 fixture")
             assert request("GET", object_path, tunnel=True)[0] == 403

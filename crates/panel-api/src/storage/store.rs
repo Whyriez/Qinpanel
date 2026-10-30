@@ -128,7 +128,9 @@ pub async fn finish(
 pub fn outcome_state(result: &Result<Outcome, Failure>) -> &'static str {
     match result {
         Ok(_) => "succeeded",
-        Err(Failure::Timeout | Failure::Unavailable | Failure::Invalid) => "unknown",
+        Err(
+            Failure::Timeout | Failure::Unavailable | Failure::Invalid | Failure::DeleteUnconfirmed,
+        ) => "unknown",
         Err(Failure::Provider(code)) if *code >= 500 => "unknown",
         Err(_) => "failed",
     }

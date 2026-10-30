@@ -721,7 +721,7 @@ async fn storage_tls_request_is_durable_idempotent_and_excludes_manual_overwrite
 fn configuration() -> Value {
     json!({"expected_revision":0,"owner_id":2,"site_id":1,"label":"Project media","provider":"compatible","endpoint":"https://objects.example.test","region":"us-east-1","addressing":"path","bucket":"project-media","credentials":keys()})
 }
-fn connection() -> Connection {
+pub(super) fn connection() -> Connection {
     Connection {
         id: uuid::Uuid::new_v4().to_string(),
         owner_id: 2,
@@ -748,6 +748,8 @@ fn connection() -> Connection {
 #[derive(Default)]
 struct Fake {
     calls: Mutex<Vec<&'static str>>,
+    object_keys: Mutex<Vec<String>>,
+    head_status: AtomicU16,
     fail: AtomicU16,
     session: AtomicBool,
     managed_fail: AtomicBool,
@@ -854,13 +856,26 @@ impl StorageRuntime for Fake {
                 Operation::Download { .. } => "download",
                 Operation::AccessLink { .. } => "access_link",
                 Operation::ReadObject { .. } => "read_object",
+                Operation::HeadObject { .. } => "head_object",
             });
+            if let Operation::Delete { key } | Operation::HeadObject { key } = &operation {
+                self.object_keys
+                    .lock()
+                    .expect("object keys")
+                    .push(key.clone());
+            }
             match self.fail.load(Ordering::SeqCst) {
                 0 => {}
                 999 => return Err(Failure::Timeout),
                 status => return Err(Failure::Provider(status)),
             }
             Ok(match operation {
+                Operation::HeadObject { .. } => match self.head_status.load(Ordering::SeqCst) {
+                    200 => Outcome::Done,
+                    0 => return Err(Failure::Provider(404)),
+                    999 => return Err(Failure::Timeout),
+                    status => return Err(Failure::Provider(status)),
+                },
                 Operation::List { prefix, token } if self.paged.load(Ordering::SeqCst) => {
                     let first = prefix.is_empty() && token.is_none();
                     Outcome::Listing(Listing {
@@ -1404,6 +1419,114 @@ fn namespaced_s3_xml_preserves_listing_and_resource_limits() {
         "</nested>".repeat(17)
     );
     assert!(transport::parse_listing(deep.as_bytes(), "").is_err());
+}
+
+#[test]
+fn listing_query_encoding_preserves_spaces_literal_pluses_and_percent_once() {
+    let name = "WhatsApp Image 2026-10-02 at 20.58.22.jpeg";
+    let xml = br#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+        <IsTruncated>true</IsTruncated><EncodingType>url</EncodingType>
+        <NextContinuationToken>opaque+token%2B==</NextContinuationToken>
+        <Contents><Key>WhatsApp+Image+2026-10-02+at+20.58.22.jpeg</Key><Size>42</Size><LastModified>2026-10-30T00:00:00Z</LastModified></Contents>
+        <Contents><Key>WhatsApp%2BImage%2B2026-10-02%2Bat%2B20.58.22.jpeg</Key><Size>43</Size><LastModified>2026-10-30T00:00:00Z</LastModified></Contents>
+        <Contents><Key>literal%252B%2520.txt</Key><Size>44</Size><LastModified>2026-10-30T00:00:00Z</LastModified></Contents>
+        <CommonPrefixes><Prefix>folder+space%2Bplus%2F</Prefix></CommonPrefixes>
+    </ListBucketResult>"#;
+    let listing = transport::parse_listing(xml, "").expect("query-escaped list");
+    assert_eq!(listing.objects[0].key, name);
+    assert_eq!(
+        listing.objects[1].key,
+        "WhatsApp+Image+2026-10-02+at+20.58.22.jpeg"
+    );
+    assert_eq!(listing.objects[2].key, "literal%2B%20.txt");
+    assert_eq!(listing.prefixes, ["folder space+plus/"]);
+    assert_eq!(listing.next_token.as_deref(), Some("opaque+token%2B=="));
+    assert!(
+        transport::parse_listing(xml, name).is_err(),
+        "Other keys in this fixture are outside the exact prefix"
+    );
+    let exact = String::from(
+        "<ListBucketResult><IsTruncated>false</IsTruncated><EncodingType>url</EncodingType><Contents><Key>WhatsApp+Image+2026-10-02+at+20.58.22.jpeg</Key><Size>42</Size><LastModified>2026-10-30T00:00:00Z</LastModified></Contents></ListBucketResult>",
+    );
+    let exact = transport::parse_listing(exact.as_bytes(), name)
+        .expect("exact prefix no longer rejects spaces");
+    assert_eq!(exact.objects[0].key, name);
+    assert!(
+        signing::public_url(&connection(), &exact.objects[0].key)
+            .expect("URL")
+            .contains("WhatsApp%20Image%202026-10-02%20at%2020.58.22.jpeg")
+    );
+    let plain = br#"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>plain+plus%20.txt</Key><Size>1</Size><LastModified>2026-10-30T00:00:00Z</LastModified></Contents></ListBucketResult>"#;
+    assert_eq!(
+        transport::parse_listing(plain, "")
+            .expect("plain XML")
+            .objects[0]
+            .key,
+        "plain+plus%20.txt"
+    );
+    assert_eq!(
+        signing::decode("path+plus%20space").expect("path decode"),
+        "path+plus space"
+    );
+}
+
+#[tokio::test]
+async fn delete_checks_the_exact_listed_key_and_only_confirms_a_missing_object() {
+    for head in [0, 200, 403, 500, 999] {
+        let ctx = Context::new().await;
+        let id = ctx.create().await;
+        ctx.verify(&id).await;
+        ctx.runtime.head_status.store(head, Ordering::SeqCst);
+        let xml = b"<ListBucketResult><IsTruncated>false</IsTruncated><EncodingType>url</EncodingType><Contents><Key>photos%2FWhatsApp+Image%2Boriginal.jpeg</Key><Size>42</Size><LastModified>2026-10-30T00:00:00Z</LastModified></Contents></ListBucketResult>";
+        let key = &transport::parse_listing(xml, "photos/")
+            .expect("list")
+            .objects[0]
+            .key;
+        assert_eq!(key, "photos/WhatsApp Image+original.jpeg");
+        let (status, body) = ctx
+            .call(
+                "POST",
+                &format!("/api/v1/storage/connections/{id}/delete"),
+                Some("alice"),
+                true,
+                json!({"expected_revision":1,"key":key,"confirmation":key}),
+            )
+            .await;
+        assert_eq!(
+            *ctx.runtime.object_keys.lock().expect("keys"),
+            [key.clone(), key.clone()],
+            "DELETE and HEAD must address the same unchanged key"
+        );
+        let operation: String =
+            sqlx::query_scalar("SELECT state FROM storage_operations WHERE connection_id=?")
+                .bind(&id)
+                .fetch_one(&ctx.pool)
+                .await
+                .expect("operation");
+        if head == 0 {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(operation, "succeeded");
+        } else {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .expect("error")
+                    .contains("belum dipastikan hilang")
+            );
+            assert_eq!(operation, "unknown");
+            let verified: Option<i64> =
+                sqlx::query_scalar("SELECT verified_at FROM storage_connections WHERE id=?")
+                    .bind(&id)
+                    .fetch_one(&ctx.pool)
+                    .await
+                    .expect("verification");
+            assert!(
+                verified.is_none(),
+                "Unconfirmed delete requires readback before another mutation"
+            );
+        }
+    }
 }
 
 #[tokio::test]

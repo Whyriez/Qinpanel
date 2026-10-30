@@ -181,6 +181,9 @@ pub enum Operation {
     ReadObject {
         key: String,
     },
+    HeadObject {
+        key: String,
+    },
     Download {
         key: String,
     },
@@ -198,6 +201,8 @@ pub enum Outcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Failure {
+    #[error("Penghapusan object belum terkonfirmasi.")]
+    DeleteUnconfirmed,
     #[error("Conditional PUT belum terverifikasi pada provider ini.")]
     ConditionalUnsupported,
     #[error("Endpoint storage tidak diizinkan.")]
