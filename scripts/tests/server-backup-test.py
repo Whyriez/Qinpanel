@@ -215,6 +215,7 @@ class MigrationTests(unittest.TestCase):
         engine.execute = execute
         worker.Engine.pack(engine, output, self.metadata)
         self.assertIn("--exclude=etc/nginx/conf.d/qonpanel-object-storage.conf", calls[0])
+        self.assertIn("--exclude=etc/nginx/conf.d/qonpanel-object-storage-acme.conf", calls[0])
         self.assertIn("etc/nginx", calls[0])
 
     def test_full_roundtrip_keeps_accounts_secrets_applications_mail_and_databases(self):

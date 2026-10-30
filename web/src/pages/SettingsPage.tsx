@@ -94,7 +94,7 @@ export const SettingsPage: React.FC = () => {
       {activeSection === 'ai' && <AiSettings />}
       {activeSection === 'updates' && <PanelUpdateCard />}
       {activeSection === 'connectivity' && <ConnectivitySettings />}
-      {activeSection === 'network' && <NetworkSettings key={route.search.get('network_tab') ?? 'public'} initialTab={route.search.get('network_tab') === 'certificates' ? 'certificates' : 'public'} />}
+      {activeSection === 'network' && <NetworkSettings key={route.search.get('network_tab') ?? 'public'} initialTab={route.search.get('network_tab') === 'certificates' ? 'certificates' : route.search.get('network_tab') === 'tunnels' ? 'tunnels' : 'public'} />}
       {activeSection === 'optimizer' && (
         <ServerOptimizerCard />
       )}

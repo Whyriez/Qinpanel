@@ -55,6 +55,7 @@ export const bindStorageProject = (connection: StorageConnection, site_id: numbe
 export const disconnectStorage = (connection: StorageConnection) => request(path(connection.id), { method: 'DELETE', body: JSON.stringify({ expected_revision: connection.revision, confirmation: connection.bucket }) });
 export const createStorageBucket = (connection: StorageConnection) => request(`${path(connection.id)}/bucket`, { method: 'POST', body: JSON.stringify({ expected_revision: connection.revision, confirmation: connection.bucket }) });
 export interface ManagedStorageStatus {
+  connection_mode?: 'https' | 'tunnel' | null; origin_url?: string | null; origin_ready?: boolean; public_access_verified?: boolean;
   configured: boolean; running: boolean; endpoint: string | null; engine_version: string;
   data_directory: string; capacity_bytes: number | null; available_bytes: number | null; bucket_count: number; quota_enforcement: 'none';
 }
@@ -69,6 +70,7 @@ export function storageAllocationId(): string {
 export const fetchManagedStorage = (signal?: AbortSignal) => request<ManagedStorageStatus>(`${root}/managed`, { signal });
 export const configureManagedStorage = (value: { hostname: string; fullchain_pem: string; private_key_pem: string }) => request<ManagedStorageStatus>(`${root}/managed`, { method: 'POST', body: JSON.stringify(value) });
 export interface StorageTlsCertificate {
+  method?: 'dns01' | 'http01' | 'tunnel'; zone_id?: string | null; tunnel_id?: string | null;
   revision: number; request_id: string | null; hostname: string | null; email: string | null;
   state: 'idle' | 'queued' | 'issuing' | 'configuring' | 'active' | 'failed' | 'manual';
   auto_renew: boolean; not_after: number | null; renew_at: number | null; job_id: string | null; error: string | null;
@@ -84,7 +86,7 @@ export async function fetchStorageTls(signal?: AbortSignal): Promise<StorageTlsI
   }
   return value;
 }
-export const generateStorageTls = (value: { request_id: string; expected_revision: number; hostname: string; email: string; confirmed: boolean }) => request<StorageTlsCertificate>(`${root}/managed/tls`, { method: 'POST', body: JSON.stringify(value) });
+export const generateStorageTls = (value: { request_id: string; expected_revision: number; hostname: string; email: string; confirmed: boolean; method?: 'dns01' | 'http01' | 'tunnel'; zone_id?: string; tunnel_id?: string }) => request<StorageTlsCertificate>(`${root}/managed/tls`, { method: 'POST', body: JSON.stringify(value) });
 export const allocateManagedBucket = (value: { request_id: string; owner_id: number; site_id: number | null; label: string; bucket: string }) => request<StorageConnection>(`${root}/managed/buckets`, { method: 'POST', body: JSON.stringify(value) });
 export const reconcileManagedBucket = (connection: StorageConnection) => request<StorageConnection>(`${path(connection.id)}/provision`, { method: 'POST', body: JSON.stringify({ expected_revision: connection.revision }) });
 export const removeManagedBucket = (connection: StorageConnection) => request(`${path(connection.id)}/decommission`, { method: 'POST', body: JSON.stringify({ expected_revision: connection.revision, confirmation: connection.bucket }) });

@@ -253,14 +253,35 @@ pub async fn order_acme_certificate(
     email: &str,
     staging: bool,
 ) -> Result<(String, String, i64, i64), String> {
+    order_http_certificate(
+        &state.pool,
+        &state.agent_client,
+        primary_domain,
+        san_domains,
+        email,
+        staging,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn order_http_certificate(
+    pool: &panel_db::DbPool,
+    agent: &crate::agent_client::AgentClient,
+    primary_domain: &str,
+    san_domains: &[String],
+    email: &str,
+    staging: bool,
+    storage: bool,
+) -> Result<(String, String, i64, i64), String> {
     let directory_url = if staging {
         LetsEncrypt::Staging.url()
     } else {
         LetsEncrypt::Production.url()
     };
 
-    let cert_repo = SqliteCertificateRepository::new(state.pool.clone());
-    let account = get_acme_account(&state.pool, &cert_repo, email, directory_url).await?;
+    let cert_repo = SqliteCertificateRepository::new(pool.clone());
+    let account = get_acme_account(pool, &cert_repo, email, directory_url).await?;
 
     let mut all_domains = vec![primary_domain.to_string()];
     for d in san_domains {
@@ -280,62 +301,64 @@ pub async fn order_acme_certificate(
         .map_err(|e| format!("Failed to create ACME order: {e}"))?;
 
     let mut deployed_tokens = Vec::new();
-    let mut authzs = order.authorizations();
+    let result = async {
+        let mut authzs = order.authorizations();
 
-    while let Some(authz_res) = authzs.next().await {
-        let mut authz = authz_res.map_err(|e| format!("Authorization fetch failed: {e}"))?;
-        if let Some(mut chal) = authz.challenge(ChallengeType::Http01) {
-            let key_auth = chal.key_authorization();
-            let deploy_req = AcmeChallengeDeployRequest {
-                token: chal.token.clone(),
-                key_authorization: key_auth.as_str().to_string(),
-                acme_dir: None,
-            };
-            state
-                .agent_client
-                .deploy_acme_challenge(deploy_req)
-                .await
-                .map_err(|e| format!("Agent IPC challenge deploy error: {e}"))?;
+        while let Some(authz_res) = authzs.next().await {
+            let mut authz = authz_res.map_err(|e| format!("Authorization fetch failed: {e}"))?;
+            if let Some(mut chal) = authz.challenge(ChallengeType::Http01) {
+                let key_auth = chal.key_authorization();
+                let deploy_req = AcmeChallengeDeployRequest {
+                    token: chal.token.clone(),
+                    key_authorization: key_auth.as_str().to_string(),
+                    acme_dir: storage.then(|| "/var/lib/panel/acme".into()),
+                };
+                deployed_tokens.push(chal.token.clone());
+                agent
+                    .deploy_acme_challenge(deploy_req)
+                    .await
+                    .map_err(|e| format!("Agent IPC challenge deploy error: {e}"))?;
 
-            deployed_tokens.push(chal.token.clone());
-            chal.set_ready()
-                .await
-                .map_err(|e| format!("Failed to set challenge ready: {e}"))?;
+                chal.set_ready()
+                    .await
+                    .map_err(|e| format!("Failed to set challenge ready: {e}"))?;
+            }
         }
+
+        let retries = RetryPolicy::default();
+        let status = order
+            .poll_ready(&retries)
+            .await
+            .map_err(|e| format!("Order poll_ready error: {e}"))?;
+
+        if status != OrderStatus::Ready {
+            return Err(format!("ACME order status is not ready: {status:?}"));
+        }
+
+        let privkey_pem = order
+            .finalize()
+            .await
+            .map_err(|e| format!("Order finalize failed: {e}"))?;
+
+        let fullchain_pem = order
+            .poll_certificate(&retries)
+            .await
+            .map_err(|e| format!("Order poll_certificate failed: {e}"))?;
+
+        let (not_before, not_after, _, _) = inspect_x509_cert(&fullchain_pem)?;
+
+        Ok((fullchain_pem, privkey_pem, not_before, not_after))
     }
-
-    let retries = RetryPolicy::default();
-    let status = order
-        .poll_ready(&retries)
-        .await
-        .map_err(|e| format!("Order poll_ready error: {e}"))?;
-
-    // Cleanup challenge files via agent
+    .await;
     for token in deployed_tokens {
-        let cleanup_req = AcmeChallengeCleanupRequest {
-            token,
-            acme_dir: None,
-        };
-        let _ = state.agent_client.cleanup_acme_challenge(cleanup_req).await;
+        let _ = agent
+            .cleanup_acme_challenge(AcmeChallengeCleanupRequest {
+                token,
+                acme_dir: storage.then(|| "/var/lib/panel/acme".into()),
+            })
+            .await;
     }
-
-    if status != OrderStatus::Ready {
-        return Err(format!("ACME order status is not ready: {status:?}"));
-    }
-
-    let privkey_pem = order
-        .finalize()
-        .await
-        .map_err(|e| format!("Order finalize failed: {e}"))?;
-
-    let fullchain_pem = order
-        .poll_certificate(&retries)
-        .await
-        .map_err(|e| format!("Order poll_certificate failed: {e}"))?;
-
-    let (not_before, not_after, _, _) = inspect_x509_cert(&fullchain_pem)?;
-
-    Ok((fullchain_pem, privkey_pem, not_before, not_after))
+    result
 }
 
 /// Deploys certificate to agent and recompiles/applies site vhost.

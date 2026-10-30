@@ -183,6 +183,12 @@ pub async fn validate_publication(
     pool: &DbPool,
     command: CloudflareRequest,
 ) -> Result<CloudflareRequest, Error> {
+    if matches!(command, CloudflareRequest::PublishStorage { .. }) {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "Gunakan dialog aktivasi storage untuk menerbitkan rute storage.",
+        ));
+    }
     if let CloudflareRequest::Publish {
         zone_id,
         tunnel_id,

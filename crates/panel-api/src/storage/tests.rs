@@ -479,6 +479,70 @@ async fn raster_preview_is_sniffed_and_active_documents_are_rejected() {
 }
 
 #[tokio::test]
+async fn storage_tunnel_and_public_ip_queue_without_dns_tokens_but_keep_admin_csrf_and_consent() {
+    for method in ["tunnel", "http01"] {
+        let ctx = Context::new().await;
+        ctx.runtime.dns_configured.store(false, Ordering::SeqCst);
+        ctx.runtime.dns_fail.store(true, Ordering::SeqCst);
+        let mut input = json!({"request_id":uuid::Uuid::new_v4(),"expected_revision":1,"hostname":"storage.example.test","method":method,"email":"admin@example.test","confirmed":true});
+        if method == "tunnel" {
+            input["email"] = json!("");
+            input["confirmed"] = json!(false);
+            input["zone_id"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            input["tunnel_id"] = json!("7c03851f-60dd-49d1-a3aa-a2100320e7c9");
+        }
+        let path = "/api/v1/storage/managed/tls";
+        for (actor, csrf, expected) in [
+            (None, false, StatusCode::UNAUTHORIZED),
+            (Some("alice"), true, StatusCode::FORBIDDEN),
+            (Some("admin"), false, StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                ctx.call("POST", path, actor, csrf, input.clone()).await.0,
+                expected
+            );
+        }
+        if method == "http01" {
+            let mut denied = input.clone();
+            denied["confirmed"] = json!(false);
+            assert_eq!(
+                ctx.call("POST", path, Some("admin"), true, denied).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        } else {
+            let mut denied = input.clone();
+            denied["tunnel_id"] = json!("http://untrusted");
+            assert_eq!(
+                ctx.call("POST", path, Some("admin"), true, denied).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let (status, body) = ctx
+            .call("POST", path, Some("admin"), true, input.clone())
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body["method"], method);
+        assert_eq!(body["auto_renew"], method == "http01");
+        assert_eq!(body["state"], "queued");
+        assert_eq!(
+            ctx.call("POST", path, Some("admin"), true, input.clone())
+                .await
+                .0,
+            StatusCode::ACCEPTED
+        );
+        input["method"] = json!("dns01");
+        input["email"] = json!("admin@example.test");
+        input["confirmed"] = json!(true);
+        input.as_object_mut().expect("object").remove("zone_id");
+        input.as_object_mut().expect("object").remove("tunnel_id");
+        assert_eq!(
+            ctx.call("POST", path, Some("admin"), true, input).await.0,
+            StatusCode::CONFLICT
+        );
+    }
+}
+
+#[tokio::test]
 async fn storage_tls_inventory_distinguishes_dns_agent_failure_from_missing_token() {
     let ctx = Context::new().await;
     for (configured, failed) in [(false, false), (true, false), (true, true)] {
@@ -710,6 +774,12 @@ impl StorageRuntime for Fake {
                     Ok(
                         json!({"configured":true,"running":true,"endpoint":"https://storage.example.test"}),
                     )
+                }
+                panel_proto::ManagedStorageRequest::ConfigureTunnel { .. } => Ok(
+                    json!({"configured":true,"running":true,"origin_ready":true,"connection_mode":"tunnel","endpoint":"https://storage.example.test"}),
+                ),
+                panel_proto::ManagedStorageRequest::PrepareHttp { .. } => {
+                    Ok(json!({"prepared":true}))
                 }
                 panel_proto::ManagedStorageRequest::Provision { .. } => {
                     self.calls.lock().expect("lock").push("managed_provision");

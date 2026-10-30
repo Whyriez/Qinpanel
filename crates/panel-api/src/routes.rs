@@ -223,6 +223,7 @@ use panel_db::pool::DbPool;
     components(
         schemas(
             crate::storage::managed::ManagedStorageConfiguration,
+            crate::storage::tls::StorageMethod,
             crate::storage::tls::Generate,
             crate::storage::managed::ManagedStorageAllocation,
             crate::storage::managed::ManagedStorageKeyInput,

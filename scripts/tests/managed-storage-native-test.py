@@ -58,8 +58,8 @@ class LocalHTTPS(http.client.HTTPSConnection):
         self.sock = ssl.create_default_context().wrap_socket(tcp, server_hostname=HOST)
 
 
-def request(method, path, keys=None, body=b""):
-    headers = {"host": HOST}
+def request(method, path, keys=None, body=b"", tunnel=False, host=HOST):
+    headers = {"host": host}
     if keys:
         now = datetime.datetime.now(datetime.timezone.utc)
         timestamp, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
@@ -76,7 +76,7 @@ def request(method, path, keys=None, body=b""):
             signing = hmac.new(signing, part.encode(), hashlib.sha256).digest()
         signature = hmac.new(signing, value.encode(), hashlib.sha256).hexdigest()
         headers["authorization"] = f"AWS4-HMAC-SHA256 Credential={keys['access_key']}/{scope}, SignedHeaders={signed}, Signature={signature}"
-    connection = LocalHTTPS(HOST, timeout=15)
+    connection = http.client.HTTPConnection("127.0.0.1", 17891, timeout=15) if tunnel else LocalHTTPS(HOST, timeout=15)
     try:
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
@@ -170,6 +170,41 @@ def main():
             assert request("GET", "/alice-media/nested/hello%20world.txt", rotated)[0] == 200
             assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", alice))[0] == 403, "A fresh query signed with the revoked key must fail"
             assert request("GET", presigned_get("/alice-media/nested/hello%20world.txt", rotated)) == (200, b"Qinpanel native S3 fixture")
+            before = Path("/etc/qonpanel-storage/state.json").read_bytes()
+            assert control({"action": "prepare_http", "hostname": HOST})["prepared"]
+            challenge = Path("/var/lib/panel/acme/.well-known/acme-challenge/native-storage")
+            challenge.parent.mkdir(parents=True, exist_ok=True)
+            challenge.write_text("native HTTP-01 fixture")
+            http = http.client.HTTPConnection("127.0.0.1", 80, timeout=10)
+            try:
+                http.request("GET", "/.well-known/acme-challenge/native-storage", headers={"host": HOST})
+                response = http.getresponse()
+                assert (response.status, response.read()) == (200, b"native HTTP-01 fixture")
+            finally:
+                http.close()
+                challenge.unlink()
+            assert Path("/etc/qonpanel-storage/state.json").read_bytes() == before
+            origin = control({"action": "configure_tunnel", "hostname": HOST})
+            assert origin["connection_mode"] == "tunnel" and origin["origin_ready"]
+            assert origin["endpoint"] == f"https://{HOST}" and not origin["public_access_verified"]
+            after = json.loads(Path("/etc/qonpanel-storage/state.json").read_bytes())
+            assert after["root"] == json.loads(before)["root"] and after["buckets"] == json.loads(before)["buckets"]
+            object_path = "/alice-media/nested/hello%20world.txt"
+            assert request("GET", object_path, rotated, tunnel=True) == (200, b"Qinpanel native S3 fixture")
+            assert request("GET", presigned_get(object_path, rotated), tunnel=True) == (200, b"Qinpanel native S3 fixture")
+            assert request("GET", object_path, tunnel=True)[0] == 403
+            assert request("GET", "/bob-media?list-type=2", rotated, tunnel=True)[0] == 403
+            assert request("GET", presigned_get(object_path, alice), tunnel=True)[0] == 403
+            assert request("PUT", "/alice-media/tunnel.txt", rotated, b"loopback fixture", tunnel=True)[0] == 200
+            assert request("GET", "/alice-media/tunnel.txt", rotated, tunnel=True) == (200, b"loopback fixture")
+            assert request("DELETE", "/alice-media/tunnel.txt", rotated, tunnel=True)[0] == 204
+            try:
+                request("GET", object_path, rotated, tunnel=True, host="other.example.test")
+                raise AssertionError("Unknown hostname must not reach storage")
+            except http.client.RemoteDisconnected:
+                pass
+            assert request("GET", object_path, rotated)[0] == 200, "Keep prior HTTPS while route changes"
+            assert control({"action": "configure_tunnel", "hostname": HOST})["origin_ready"]
             assert request("GET", "/bob-media?list-type=2", bob)[0] == 200
             assert request("DELETE", "/alice-media/nested/hello%20world.txt", rotated)[0] == 204
             assert control({"action": "decommission", "connection_id": identities[0][0], "owner_id": 2, "bucket": "alice-media"})["removed"]

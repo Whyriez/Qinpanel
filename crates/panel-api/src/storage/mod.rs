@@ -74,6 +74,22 @@ pub fn ok(value: Value) -> Response {
 }
 
 pub trait StorageRuntime: Send + Sync {
+    fn http_certificate(
+        &self,
+        _pool: panel_db::DbPool,
+        _hostname: String,
+        _email: String,
+    ) -> BoxFuture<'_, Result<StorageCertificate, String>> {
+        Box::pin(async { Err("Penerbitan HTTP-01 belum tersedia.".into()) })
+    }
+    fn publish_tunnel(
+        &self,
+        _zone_id: String,
+        _tunnel_id: String,
+        _hostname: String,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async { Err("Publikasi Tunnel belum tersedia.".into()) })
+    }
     fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
         Box::pin(async { Err(Failure::Unavailable) })
     }
@@ -109,6 +125,32 @@ struct LiveRuntime {
     network: tokio::sync::Semaphore,
 }
 impl StorageRuntime for LiveRuntime {
+    fn http_certificate(
+        &self,
+        pool: panel_db::DbPool,
+        hostname: String,
+        email: String,
+    ) -> BoxFuture<'_, Result<StorageCertificate, String>> {
+        Box::pin(async move {
+            let (chain, key, _, _) = crate::ssl::order_http_certificate(&pool, &self.agent, &hostname, &[], &email, false, true).await
+                .map_err(|_| "Validasi HTTP-01 gagal. Arahkan DNS domain storage ke IP publik server dan pastikan port 80 dapat dijangkau.".to_owned())?;
+            Ok(StorageCertificate {
+                chain,
+                key: StorageSecret(key),
+            })
+        })
+    }
+    fn publish_tunnel(
+        &self,
+        zone_id: String,
+        tunnel_id: String,
+        hostname: String,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            self.agent.cloudflare(panel_proto::CloudflareRequest::PublishStorage { zone_id, tunnel_id, hostname }).await
+                .map_err(|_| "Origin storage lokal siap, tetapi publikasi Tunnel belum berhasil. Periksa konektor lokal aktif, izin management Tunnel/DNS dan konflik hostname; muat ulang sebelum mencoba lagi.".into())
+        })
+    }
     fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
         Box::pin(async move {
             self.agent

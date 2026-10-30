@@ -22,8 +22,8 @@ def sql(prefix):
 ENROLL = sql("UPDATE managed_storage_tls SET revision=revision+1,request_id=?,job_id=?,actor_id=")
 MANUAL = sql("UPDATE managed_storage_tls SET revision=revision+1,state='configuring'")
 CLAIM = sql("UPDATE managed_storage_tls SET state='issuing'")
-APPLY = sql("UPDATE managed_storage_tls SET state='active'")
-FINISH = sql("UPDATE managed_storage_tls SET state=?,auto_renew=0")
+APPLY = sql("UPDATE managed_storage_tls SET state='active',not_before=")
+FINISH = sql("UPDATE managed_storage_tls SET state=?,method='dns01'")
 RENEW = sql("UPDATE managed_storage_tls SET revision=revision+1,request_id=?,job_id=?,state='queued'")
 FAIL = sql("UPDATE managed_storage_tls SET state='failed',auto_renew=0,updated_at=")
 
@@ -36,9 +36,29 @@ class StorageTlsMigration(unittest.TestCase):
         self.before = self.db.execute("SELECT * FROM storage_connections").fetchall()
         self.users = self.db.execute("SELECT * FROM users").fetchall()
         self.db.executescript(MIGRATION.read_text())
+        self.db.executescript((ROOT / "crates/panel-db/migrations/20261030000001_storage_connection_mode.sql").read_text())
 
     def enroll(self):
-        return self.db.execute(ENROLL, ("request", "job", 1, "storage.example.test", "admin@example.test", "zone", "example.test", "revision", 100, 100, 1)).rowcount
+        return self.db.execute(ENROLL, ("request", "job", 1, "storage.example.test", "admin@example.test", "zone", "example.test", "revision", "dns01", None, 1, 100, 100, 1)).rowcount
+
+    def test_upgrade_retains_pending_legacy_dns_jobs_and_renewal_metadata(self):
+        previous = sqlite3.connect(":memory:")
+        self.addCleanup(previous.close)
+        previous.executescript(MIGRATION.read_text())
+        previous.execute("UPDATE managed_storage_tls SET revision=9,state='queued',auto_renew=1,job_id='old-job',request_id='old-request',hostname='storage.example.test',credential_revision='old-credential',renew_at=5000")
+        before = previous.execute("SELECT revision,state,auto_renew,job_id,request_id,hostname,credential_revision,renew_at FROM managed_storage_tls").fetchone()
+        previous.executescript((ROOT / "crates/panel-db/migrations/20261030000001_storage_connection_mode.sql").read_text())
+        self.assertEqual(previous.execute("SELECT revision,state,auto_renew,job_id,request_id,hostname,credential_revision,renew_at FROM managed_storage_tls").fetchone(), before)
+        self.assertEqual(previous.execute("SELECT method,tunnel_id FROM managed_storage_tls").fetchone(), ("dns01", None))
+
+    def test_tunnel_activation_uses_cas_and_never_schedules_ca_renewal(self):
+        self.assertEqual(self.db.execute(ENROLL, ("request", "job", 1, "storage.example.test", "", "zone", None, None, "tunnel", "tunnel", 0, 100, 100, 1)).rowcount, 1)
+        self.assertEqual(self.db.execute(CLAIM, (101, 2)).rowcount, 1)
+        apply_tunnel = sql("UPDATE managed_storage_tls SET state='active',auto_renew=0,not_before=NULL")
+        self.assertEqual(self.db.execute(apply_tunnel, (102, 2)).rowcount, 1)
+        self.assertEqual(self.db.execute(apply_tunnel, (102, 2)).rowcount, 0)
+        self.assertEqual(self.db.execute("SELECT state,method,auto_renew,not_after FROM managed_storage_tls").fetchone(), ("active", "tunnel", 0, None))
+        self.assertEqual(self.db.execute(RENEW, ("next", "next-job", 4000, 4000, 2)).rowcount, 0)
 
     def test_upgrade_preserves_existing_users_connections_and_sealed_credentials(self):
         self.assertEqual(self.db.execute("SELECT * FROM storage_connections").fetchall(), self.before)

@@ -53,13 +53,24 @@ describe('Managed storage', () => {
     expect(canCancelJob({name:'storage.tls.issue',status:'queued'} as JobItem)).toBe(true);
     expect(canCancelJob({name:'storage.tls.issue',status:'running'} as JobItem)).toBe(false);
   });
-  it('defaults to DNS-01 generation with consent and preserves the manual certificate option', () => {
+  it('defaults new installations to Tunnel without DNS token, email or PEM fields', () => {
     const html=renderToString(<ConfigureDialog english={false} status={null} onClose={vi.fn()} onSaved={vi.fn()} />);
-    expect(html).toContain('Generate otomatis'); expect(html).toContain('Generate &amp; aktifkan');
-    expect(html).toContain('DNS-01 Cloudflare'); expect(html).toContain('perpanjangan otomatis');
+    expect(html).toContain('Aktifkan melalui Tunnel');
+    expect(html).toContain('HTTPS publik ditangani Cloudflare');
+    expect(html).toContain('IP publik · HTTPS otomatis');
+    expect(html).toContain('Lanjutan · sertifikat DNS-01');
     expect(html).toContain('Gunakan sertifikat sendiri'); expect(html).not.toContain('<textarea');
-    expect(html).toContain('Memeriksa token DNS-01'); expect(html).toContain('type="email"');
+    expect(html).toContain('Memeriksa koneksi Tunnel'); expect(html).not.toContain('type="email"');
+    expect(html).not.toContain('type="checkbox"');
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled/);
     expect(html).not.toContain('Hubungkan token DNS-01 (tab baru)');
+  });
+  it('preserves certificate controls for legacy HTTPS installations', () => {
+    const html = renderToString(<ConfigureDialog english={false} status={status} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(html).toContain('Memeriksa token DNS-01');
+    expect(html).toContain('type="email"');
+    expect(html).toContain('perpanjangan otomatis');
+    expect(html).toContain('Lanjutan · sertifikat DNS-01');
   });
   it('explains why a connected Tunnel does not make DNS-01 ready and links to the certificate tab', () => {
     const html = renderToString(<StorageDnsStatus english={false} dns={{ available: true, configured: false, zone_name: null }} checking={false} failed={false} />);

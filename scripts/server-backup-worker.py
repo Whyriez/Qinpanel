@@ -415,6 +415,7 @@ class Engine:
         save_json(meta / "qonpanel-manifest.json", manifest)
         args = ["tar", "--create", "--file", str(output), "--acls", "--xattrs", "--xattrs-include=user.*",
                 "--exclude=etc/nginx/conf.d/qonpanel-object-storage.conf",
+                "--exclude=etc/nginx/conf.d/qonpanel-object-storage-acme.conf",
                 "--exclude=var/lib/panel/backups", "--exclude=var/lib/panel/server-transfers",
                 "--exclude=var/lib/panel/server-backups", "--exclude=var/lib/panel/*-wal", "--exclude=var/lib/panel/*-shm",
                 "-C", str(meta), "qonpanel-manifest.json"]

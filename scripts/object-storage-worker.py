@@ -41,6 +41,8 @@ DATA = "/var/lib/qonpanel-storage"
 CONFIG = "/etc/qonpanel-storage"
 ENGINE = "/usr/local/lib/qonpanel-storage/weed"
 MARKER = "# Managed by QonPanel object storage\n"
+TUNNEL_PORT = 17891
+ACME_CONFIG = "/etc/nginx/conf.d/qonpanel-object-storage-acme.conf"
 
 
 class StorageError(Exception):
@@ -60,7 +62,7 @@ def error_response(error):
     if isinstance(error, StorageSetupError) and error.stage in {
         "certificate validation", "verified engine installation",
         "Nginx configuration validation", "storage service startup",
-        "storage readiness", "HTTPS activation",
+        "storage readiness", "HTTPS activation", "Tunnel origin activation",
     }:
         response["stage"] = error.stage
     return response
@@ -150,14 +152,17 @@ def validate_request(value):
     fields = {
         "status": {"action"},
         "configure": {"action", "hostname", "fullchain_pem", "private_key_pem"},
+        "configure_tunnel": {"action", "hostname"},
+        "prepare_http": {"action", "hostname"},
         "provision": {"action", "connection_id", "owner_id", "bucket", "credentials"},
         "application_key": {"action", "connection_id", "owner_id", "bucket", "generation", "credentials"},
         "decommission": {"action", "connection_id", "owner_id", "bucket"},
     }
     if action not in fields or set(value) != fields[action]:
         raise StorageError("Invalid managed storage fields.")
-    if action == "configure":
+    if action in ("configure", "configure_tunnel", "prepare_http"):
         hostname(value["hostname"])
+    if action == "configure":
         for key in ("fullchain_pem", "private_key_pem"):
             if not isinstance(value[key], str) or not 64 <= len(value[key]) <= 65536:
                 raise StorageError("Supply a valid HTTPS certificate and private key.")
@@ -286,6 +291,50 @@ def nginx_template(host, revision):
 """
 
 
+def tunnel_template(host):
+    hostname(host)
+    return f"""{MARKER}server {{
+    listen 127.0.0.1:{TUNNEL_PORT} default_server;
+    server_name _;
+    return 444;
+}}
+server {{
+    listen 127.0.0.1:{TUNNEL_PORT};
+    server_name {host};
+    client_max_body_size 5g;
+    access_log off;
+    location / {{
+        proxy_pass http://unix:{SOCKET};
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Connection "";
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Authorization $http_authorization;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }}
+}}
+"""
+
+
+def acme_template(host):
+    hostname(host)
+    return f"""{MARKER}server {{
+    listen 80;
+    server_name {host};
+    access_log off;
+    location ^~ /.well-known/acme-challenge/ {{
+        root /var/lib/panel/acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }}
+    location / {{ return 404; }}
+}}
+"""
+
+
 def auth_document(state):
     def identity(name, keys, actions):
         return {"name": name, "credentials": [{"accessKey": keys["access_key"], "secretKey": keys["secret_key"]}], "actions": actions}
@@ -329,7 +378,8 @@ def s3_request(state, method, path, keys=None, public=False, timeout=10):
         signing = hmac.new(signing, part.encode(), hashlib.sha256).digest()
     signature = hmac.new(signing, string.encode(), hashlib.sha256).hexdigest()
     headers["authorization"] = f"AWS4-HMAC-SHA256 Credential={keys['access_key']}/{scope}, SignedHeaders={signed}, Signature={signature}"
-    connection = LocalHTTPS(state["hostname"], timeout=timeout) if public else UnixHTTP("localhost", timeout=timeout)
+    connection = (http.client.HTTPConnection("127.0.0.1", TUNNEL_PORT, timeout=timeout)
+                  if state.get("connection_mode") == "tunnel" else LocalHTTPS(state["hostname"], timeout=timeout)) if public else UnixHTTP("localhost", timeout=timeout)
     try:
         connection.request(method, path, body=b"", headers=headers)
         response = connection.getresponse()
@@ -378,6 +428,19 @@ def wait_for_https(state, fullchain, timeout=30):
         if remaining > 0:
             time.sleep(min(0.5, remaining))
     raise StorageError("Storage HTTPS readiness timed out. " + reason)
+
+
+def wait_for_tunnel(state, timeout=30):
+    deadline = time.monotonic() + timeout
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            if s3_request(state, "GET", "/", public=True, timeout=min(3, remaining)) == 200:
+                return
+        except (OSError, http.client.HTTPException):
+            pass
+        if (remaining := deadline - time.monotonic()) > 0:
+            time.sleep(min(0.5, remaining))
+    raise StorageError("Storage Tunnel loopback origin did not become ready.")
 
 
 class ReleaseRedirect(urllib.request.HTTPRedirectHandler):
@@ -439,8 +502,9 @@ def install_engine():
 
 class Controller:
     def __init__(self, config=Path(CONFIG), data=Path(DATA), unit=Path("/etc/systemd/system") / UNIT,
-                 nginx=Path("/etc/nginx/conf.d/qonpanel-object-storage.conf")):
+                 nginx=Path("/etc/nginx/conf.d/qonpanel-object-storage.conf"), acme=Path(ACME_CONFIG)):
         self.config, self.data, self.unit, self.nginx = config, data, unit, nginx
+        self.acme = acme
         self.state_path = config / "state.json"
 
     def state(self):
@@ -463,7 +527,16 @@ class Controller:
             except (StorageError, OSError, TimeoutError, http.client.HTTPException):
                 pass
         usage = shutil.disk_usage(self.data) if self.data.exists() else None
+        origin_ready = False
+        if running:
+            try:
+                origin_ready = s3_request(state, "GET", "/", public=True, timeout=3) == 200
+            except (OSError, http.client.HTTPException):
+                pass
         return {"configured": bool(state), "running": running, "endpoint": f"https://{state['hostname']}" if state else None,
+                "connection_mode": state.get("connection_mode", "https") if state else None,
+                "origin_ready": origin_ready, "public_access_verified": False,
+                "origin_url": f"http://127.0.0.1:{TUNNEL_PORT}" if state and state.get("connection_mode") == "tunnel" else None,
                 "engine_version": VERSION, "data_directory": DATA, "capacity_bytes": usage.total if usage else None,
                 "available_bytes": usage.free if usage else None, "bucket_count": sum(not record.get("deleted", False) for record in state["buckets"].values()) if state else 0,
                 "quota_enforcement": "none"}
@@ -498,8 +571,42 @@ class Controller:
             time.sleep(1)
         raise StorageError("Storage did not become ready. Existing object data was preserved.")
 
+    def prepare_http(self, request):
+        host = hostname(request["hostname"])
+        previous = self.state()
+        if previous and previous["hostname"] != host:
+            raise StorageError("Use the existing storage hostname.")
+        command(["systemctl", "is-active", "--quiet", "nginx"], 10)
+        old = self.acme.read_bytes() if self.acme.exists() else None
+        if self.acme.is_symlink() or old is not None and not old.decode().startswith(MARKER):
+            raise StorageError("An unmanaged ACME configuration already exists; it was preserved.")
+        config = command(["nginx", "-T"], 20).decode(errors="replace")
+        for path in (self.nginx, self.acme):
+            if path.is_file() and not path.is_symlink() and path.read_text().startswith(MARKER):
+                config = config.replace(path.read_text(), "")
+        if any(host in match.group(1).split() for match in re.finditer(r"\bserver_name\s+([^;]+);", config)):
+            raise StorageError("That hostname is already used by Nginx.")
+        try:
+            atomic_write(self.acme, acme_template(host).encode(), 0o644)
+            relabel([self.acme])
+            command(["nginx", "-t"], 20)
+            command(["systemctl", "reload", "nginx"])
+        except Exception:
+            try:
+                if old is None:
+                    self.acme.unlink(missing_ok=True)
+                else:
+                    atomic_write(self.acme, old, 0o644)
+                command(["nginx", "-t"], 20)
+                command(["systemctl", "reload", "nginx"])
+            except Exception:
+                raise StorageError("HTTP-01 listener failed and rollback is incomplete; inspect Nginx.") from None
+            raise StorageError("HTTP-01 listener could not be prepared; previous configuration restored.") from None
+        return {"prepared": True}
+
     def configure(self, request):
         previous = self.state()
+        tunnel = request.get("action") == "configure_tunnel"
         host = hostname(request["hostname"])
         if previous and host != previous["hostname"]:
             raise StorageError("The storage endpoint cannot be moved while buckets exist. Renew the certificate using the same hostname.")
@@ -527,31 +634,53 @@ class Controller:
         nginx = command(["nginx", "-T"], 20).decode(errors="replace")
         own = self.nginx.read_text() if self.nginx.exists() else ""
         other = nginx.replace(own, "") if own else nginx
+        if self.acme.is_file() and not self.acme.is_symlink() and self.acme.read_text().startswith(MARKER):
+            other = other.replace(self.acme.read_text(), "")
         for match in re.finditer(r"\bserver_name\s+([^;]+);", other):
             if host in match.group(1).split():
                 raise StorageError("That hostname is already used by Nginx. Choose a separate storage domain.")
-        state = previous or {"schema": 1, "hostname": host, "root": {"access_key": secrets.token_hex(16), "secret_key": secrets.token_hex(32)}, "buckets": {}}
+        if tunnel and (not previous or previous.get("connection_mode") != "tunnel"):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                    probe.bind(("127.0.0.1", TUNNEL_PORT))
+            except OSError:
+                raise StorageError("The fixed storage Tunnel loopback port is already in use.") from None
+        state = copy.deepcopy(previous) if previous else {"schema": 1, "hostname": host, "root": {"access_key": secrets.token_hex(16), "secret_key": secrets.token_hex(32)}, "buckets": {}}
+        if tunnel:
+            state["connection_mode"] = "tunnel"
+        elif "connection_mode" in state:
+            state["connection_mode"] = "https"
         # Store each validated pair in its own immutable directory. Switching the
         # Nginx file atomically can never expose a new cert with an old key, even
         # if the machine loses power during renewal.
-        revision = hashlib.sha256((request["fullchain_pem"] + request["private_key_pem"]).encode()).hexdigest()
-        certificate_dir = self.config / "certificates" / revision
-        safe_directory(certificate_dir)
-        chain_path, key_path = certificate_dir / "fullchain.pem", certificate_dir / "private-key.pem"
+        revision = None
+        if not tunnel:
+            revision = hashlib.sha256((request["fullchain_pem"] + request["private_key_pem"]).encode()).hexdigest()
+            certificate_dir = self.config / "certificates" / revision
+            safe_directory(certificate_dir)
+            chain_path, key_path = certificate_dir / "fullchain.pem", certificate_dir / "private-key.pem"
         paths = [self.state_path, self.config / "s3.json", self.unit, self.nginx]
         snapshot = {path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode), path.stat().st_gid) if path.exists() else None for path in paths}
         stage = "certificate validation"
         try:
-            atomic_write(chain_path, request["fullchain_pem"].encode())
-            atomic_write(key_path, request["private_key_pem"].encode())
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(str(chain_path), str(key_path))
-            command(["openssl", "x509", "-in", str(chain_path), "-noout", "-checkhost", host, "-checkend", "86400"], 10)
+            if not tunnel:
+                atomic_write(chain_path, request["fullchain_pem"].encode())
+                atomic_write(key_path, request["private_key_pem"].encode())
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(str(chain_path), str(key_path))
+                command(["openssl", "x509", "-in", str(chain_path), "-noout", "-checkhost", host, "-checkend", "86400"], 10)
             stage = "verified engine installation"
             install_engine()
             self.write_state(state, gid)
             atomic_write(self.unit, service_template(f"https://{host}").encode(), 0o644)
-            atomic_write(self.nginx, nginx_template(host, revision).encode(), 0o644)
+            if tunnel:
+                # Keep the previous HTTPS origin available if provider publication
+                # fails or is still propagating. Never discard its immutable PEMs.
+                legacy = own.partition("# Retained HTTPS origin\n")[2] if previous and previous.get("connection_mode") == "tunnel" else own
+                rendered = tunnel_template(host) + ("# Retained HTTPS origin\n" + legacy if legacy else "")
+            else:
+                rendered = nginx_template(host, revision)
+            atomic_write(self.nginx, rendered.encode(), 0o644)
             relabel([self.config, self.nginx, Path(ENGINE)])
             stage = "Nginx configuration validation"
             command(["nginx", "-t"], 20)
@@ -560,9 +689,12 @@ class Controller:
             command(["systemctl", "enable", "--now", UNIT], 130)
             stage = "storage readiness"
             self.healthy(state)
-            stage = "HTTPS activation"
+            stage = "Tunnel origin activation" if tunnel else "HTTPS activation"
             command(["systemctl", "reload", "nginx"])
-            wait_for_https(state, request["fullchain_pem"])
+            if tunnel:
+                wait_for_tunnel(state)
+            else:
+                wait_for_https(state, request["fullchain_pem"])
         except Exception as error:
             reason = str(error) if isinstance(error, StorageError) else "Check the certificate, DNS, dependency or service configuration."
             initial_status = service_status_summary(UNIT)
@@ -725,8 +857,10 @@ def main():
         controller = Controller()
         if request["action"] == "status":
             result = controller.status()
-        elif request["action"] == "configure":
+        elif request["action"] in ("configure", "configure_tunnel"):
             result = controller.configure(request)
+        elif request["action"] == "prepare_http":
+            result = controller.prepare_http(request)
         elif request["action"] == "decommission":
             result = controller.decommission(request)
         else:

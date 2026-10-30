@@ -82,4 +82,9 @@ pub enum CloudflareRequest {
         tunnel_id: String,
         hostname: String,
     },
+    PublishStorage {
+        zone_id: String,
+        tunnel_id: String,
+        hostname: String,
+    },
 }

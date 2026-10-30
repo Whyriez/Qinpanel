@@ -42,6 +42,8 @@ struct Route {
     record_id: String,
     #[serde(default)]
     tls: bool,
+    #[serde(default)]
+    storage: bool,
 }
 
 fn invalid(message: &str) -> AgentError {
@@ -246,6 +248,10 @@ fn list(response: Value, keys: &[&str]) -> Value {
 
 fn ingress_rule(hostname: &str, tls: bool) -> Value {
     json!({"hostname":hostname,"service": if tls {"https://127.0.0.1:443"} else {"http://127.0.0.1:80"},"originRequest":{"httpHostHeader":hostname,"originServerName":hostname,"noTLSVerify":false}})
+}
+
+fn storage_ingress_rule(hostname: &str) -> Value {
+    json!({"hostname":hostname,"service":"http://127.0.0.1:17891","originRequest":{"httpHostHeader":hostname}})
 }
 
 fn validate_ingress_boundary(ingress: &[Value]) -> Result<(), AgentError> {
@@ -775,8 +781,32 @@ pub fn execute(runner: &dyn SystemRunner, request: CloudflareRequest) -> Result<
             hostname,
             tls,
         } => publish(
-            runner, &cred, &mut local, &base, &zone_id, &tunnel_id, &hostname, tls,
+            runner, &cred, &mut local, &base, &zone_id, &tunnel_id, &hostname, tls, false,
         ),
+        CloudflareRequest::PublishStorage {
+            zone_id,
+            tunnel_id: key,
+            hostname,
+        } => {
+            tunnel_id(&key)?;
+            domain(&hostname)?;
+            let state = crate::storage_managed::execute(
+                runner,
+                panel_proto::ManagedStorageRequest::Status {},
+            )?;
+            if state["connection_mode"] != "tunnel"
+                || state["origin_ready"] != true
+                || state["endpoint"] != format!("https://{hostname}")
+                || service_state(runner, &key) != "active"
+            {
+                return Err(conflict(
+                    "Siapkan origin storage dan konektor Tunnel lokal yang aktif terlebih dahulu.",
+                ));
+            }
+            publish(
+                runner, &cred, &mut local, &base, &zone_id, &key, &hostname, false, true,
+            )
+        }
         CloudflareRequest::Unpublish {
             zone_id,
             tunnel_id,
@@ -800,12 +830,59 @@ fn publish(
     key: &str,
     hostname: &str,
     tls: bool,
+    storage: bool,
 ) -> Result<Value, AgentError> {
     tunnel_id(key)?;
     let zone_name = zone(runner, cred, zone_id)?;
     let hostname = name_in_zone(hostname, &zone_name)?;
     if !local.tunnels.contains_key(key) {
         return Err(conflict("Hubungkan tunnel ke panel terlebih dahulu."));
+    }
+    let desired = if storage {
+        storage_ingress_rule(&hostname)
+    } else {
+        ingress_rule(&hostname, tls)
+    };
+    if storage && let Some(route) = local.tunnels.get(key).and_then(|t| t.routes.get(&hostname)) {
+        if !route.storage || route.zone_id != zone_id {
+            return Err(conflict(
+                "Hostname sudah memiliki rute berbeda; konfigurasi dipertahankan.",
+            ));
+        }
+        let remote = api(
+            runner,
+            cred,
+            "GET",
+            &format!("{base}/{key}/configurations"),
+            None,
+        )?;
+        let records = api(
+            runner,
+            cred,
+            "GET",
+            &format!("zones/{zone_id}/dns_records?name={hostname}&per_page=100"),
+            None,
+        )?;
+        let exact_route = remote["result"]["config"]["ingress"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().filter(|r| r["hostname"] == hostname).count() == 1
+                    && items.contains(&desired)
+                    && validate_ingress_boundary(items).is_ok()
+            });
+        let exact_dns = records["result"].as_array().is_some_and(|items| {
+            items.len() == 1
+                && items[0]["id"] == route.record_id
+                && items[0]["type"] == "CNAME"
+                && items[0]["content"] == format!("{key}.cfargotunnel.com")
+                && items[0]["proxied"] == true
+        });
+        if exact_route && exact_dns {
+            return Ok(json!({"hostname":hostname,"published":true}));
+        }
+        return Err(conflict(
+            "Rute atau DNS storage berubah di luar panel. Periksa konflik sebelum melanjutkan.",
+        ));
     }
     if local
         .tunnels
@@ -851,7 +928,7 @@ fn publish(
         ingress.push(json!({"service":"http_status:404"}));
     }
     validate_ingress_boundary(&ingress)?;
-    ingress.insert(0, ingress_rule(&hostname, tls));
+    ingress.insert(0, desired);
     config["ingress"] = json!(ingress);
     api(runner, cred, "PUT", &path, Some(json!({"config":config})))?;
     let record = match api(
@@ -880,6 +957,7 @@ fn publish(
                 zone_id: zone_id.into(),
                 record_id: record_id.clone(),
                 tls,
+                storage,
             },
         );
     }
@@ -926,7 +1004,11 @@ fn unpublish(
     let ingress = config["ingress"]
         .as_array_mut()
         .ok_or_else(|| invalid("Konfigurasi ingress tidak valid."))?;
-    let expected = ingress_rule(&hostname, route.tls);
+    let expected = if route.storage {
+        storage_ingress_rule(&hostname)
+    } else {
+        ingress_rule(&hostname, route.tls)
+    };
     if ingress
         .iter()
         .any(|r| r["hostname"] == hostname && r != &expected)
@@ -1135,6 +1217,20 @@ mod tests {
         }
     }
     impl SystemRunner for Fixture {
+        fn run_command_with_input(
+            &self,
+            binary: &str,
+            args: &[&str],
+            input: &[u8],
+        ) -> Result<std::process::Output, AgentError> {
+            assert_eq!(binary, "python3");
+            assert_eq!(args, [crate::storage_managed::HELPER]);
+            assert_eq!(
+                serde_json::from_slice::<Value>(input).expect("typed status"),
+                json!({"action":"status"})
+            );
+            self.inner.run_command_with_input(binary, args, input)
+        }
         fn operating_system(&self) -> Result<panel_core::platform::LinuxPlatform, AgentError> {
             self.inner.operating_system()
         }
@@ -1504,6 +1600,78 @@ mod tests {
         fixture.pending();
     }
     #[test]
+    fn storage_publication_uses_only_ready_local_http_and_reconciles_exact_owned_route() {
+        let fixture = Fixture::new();
+        fixture.inner.set_response("python3 /usr/local/libexec/qonpanel-object-storage", 0,
+            br#"{"connection_mode":"tunnel","origin_ready":true,"endpoint":"https://app.example.com"}"#, b"");
+        fixture.inner.set_response(
+            &format!(
+                "systemctl show --property=ActiveState --value {}",
+                unit(TUNNEL)
+            ),
+            0,
+            b"active\n",
+            b"",
+        );
+        prepare_publish(&fixture);
+        fixture.reply(
+            "POST",
+            &format!("zones/{ZONE}/dns_records"),
+            json!({"id":RECORD}),
+        );
+        let request = CloudflareRequest::PublishStorage {
+            zone_id: ZONE.into(),
+            tunnel_id: TUNNEL.into(),
+            hostname: "app.example.com".into(),
+        };
+        assert_eq!(
+            fixture.cf(request.clone()).expect("publish")["published"],
+            true
+        );
+        let config = fixture.requests.lock().expect("requests")[3].2["config"].clone();
+        assert_eq!(
+            config["ingress"][0],
+            storage_ingress_rule("app.example.com")
+        );
+        assert_eq!(config["ingress"][1], old_config()["ingress"][0]);
+        assert_eq!(config["ingress"][2]["service"], "http_status:404");
+        assert!(
+            manifest(&fixture).expect("manifest").tunnels[TUNNEL].routes["app.example.com"].storage
+        );
+        fixture.zone();
+        fixture.reply(
+            "GET",
+            &format!("accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL}/configurations"),
+            json!({"config":config}),
+        );
+        fixture.reply("GET", &format!("zones/{ZONE}/dns_records?name=app.example.com&per_page=100"), json!([{"id":RECORD,"type":"CNAME","name":"app.example.com","content":format!("{TUNNEL}.cfargotunnel.com"),"proxied":true}]));
+        assert_eq!(fixture.cf(request).expect("reconcile")["published"], true);
+        assert_eq!(
+            fixture
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .filter(|r| r.0 == "POST")
+                .count(),
+            1
+        );
+        fixture.pending();
+    }
+    #[test]
+    fn storage_publication_refuses_unready_origin_before_any_provider_call() {
+        let fixture = Fixture::new();
+        fixture.inner.set_response("python3 /usr/local/libexec/qonpanel-object-storage", 0,
+            br#"{"connection_mode":"tunnel","origin_ready":false,"endpoint":"https://app.example.com"}"#, b"");
+        let request = CloudflareRequest::PublishStorage {
+            zone_id: ZONE.into(),
+            tunnel_id: TUNNEL.into(),
+            hostname: "app.example.com".into(),
+        };
+        assert!(fixture.cf(request).is_err());
+        assert!(fixture.requests.lock().expect("requests").is_empty());
+    }
+    #[test]
     fn publication_rejects_existing_dns_without_writing_and_rolls_back_on_dns_failure() {
         let fixture = Fixture::new();
         fixture.zone();
@@ -1598,6 +1766,7 @@ mod tests {
                 zone_id: ZONE.into(),
                 record_id: RECORD.into(),
                 tls: true,
+                storage: false,
             },
         );
         save_manifest(&fixture, &local).unwrap();
@@ -1662,6 +1831,7 @@ mod tests {
                 zone_id: ZONE.into(),
                 record_id: RECORD.into(),
                 tls: false,
+                storage: false,
             },
         );
         save_manifest(&fixture, &local).unwrap();

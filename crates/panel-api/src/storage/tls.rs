@@ -23,6 +23,8 @@ fn now() -> i64 {
 }
 #[derive(Clone, sqlx::FromRow)]
 struct Binding {
+    method: String,
+    tunnel_id: Option<String>,
     revision: i64,
     request_id: Option<String>,
     job_id: Option<String>,
@@ -50,7 +52,7 @@ fn pending(value: &Binding) -> bool {
     matches!(value.state.as_str(), "queued" | "issuing" | "configuring")
 }
 fn public(value: &Binding) -> Value {
-    json!({"revision":value.revision,"request_id":value.request_id,"hostname":value.hostname,"email":value.email,
+    json!({"method":value.method,"tunnel_id":value.tunnel_id,"zone_id":value.zone_id,"revision":value.revision,"request_id":value.request_id,"hostname":value.hostname,"email":value.email,
         "state":value.state,"auto_renew":value.auto_renew,"not_after":value.not_after,"renew_at":value.renew_at,
         "job_id":value.job_id,"error":value.error})
 }
@@ -82,6 +84,23 @@ fn provider(value: &Value, hostname: &str) -> Result<(String, String, String), E
     Ok((zone_id.into(), zone.into(), revision.into()))
 }
 
+#[derive(Default, Clone, Copy, PartialEq, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageMethod {
+    #[default]
+    Dns01,
+    Http01,
+    Tunnel,
+}
+impl StorageMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dns01 => "dns01",
+            Self::Http01 => "http01",
+            Self::Tunnel => "tunnel",
+        }
+    }
+}
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Generate {
@@ -89,7 +108,13 @@ pub struct Generate {
     pub request_id: uuid::Uuid,
     pub expected_revision: i64,
     pub hostname: String,
+    #[serde(default)]
+    pub method: StorageMethod,
+    pub zone_id: Option<String>,
+    pub tunnel_id: Option<String>,
+    #[serde(default)]
     pub email: String,
+    #[serde(default)]
     pub confirmed: bool,
 }
 #[utoipa::path(get, path="/api/v1/storage/managed/tls", responses((status=200,body=Value)), tag="storage")]
@@ -99,7 +124,12 @@ pub async fn overview(
     _admin: RequireAdmin,
 ) -> Result<Response, Error> {
     let row = binding(&state.pool).await?;
-    let dns = services.runtime.dns_status().await;
+    let dns = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        services.runtime.dns_status(),
+    )
+    .await
+    .unwrap_or(Err(super::domain::Failure::Unavailable));
     let available = dns
         .as_ref()
         .is_ok_and(|value| value["configured"].is_boolean());
@@ -141,14 +171,26 @@ fn validate(value: &Generate) -> Result<(), Error> {
     })?;
     if value.request_id.is_nil()
         || value.expected_revision < 1
-        || !value.confirmed
+        || value.method != StorageMethod::Tunnel && !value.confirmed
         || host.as_ascii() != value.hostname
         || value.hostname.parse::<std::net::IpAddr>().is_ok()
-        || value.email.len() > 254
-        || value.email.matches('@').count() != 1
-        || value.email.starts_with('@')
-        || value.email.ends_with('@')
-        || value.email.bytes().any(|c| !c.is_ascii_graphic())
+        || value.method != StorageMethod::Tunnel
+            && (value.email.len() > 254
+                || value.email.matches('@').count() != 1
+                || value.email.starts_with('@')
+                || value.email.ends_with('@')
+                || value.email.bytes().any(|c| !c.is_ascii_graphic()))
+        || value.method == StorageMethod::Tunnel
+            && (!value
+                .zone_id
+                .as_deref()
+                .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+                || !value.tunnel_id.as_deref().is_some_and(|id| {
+                    uuid::Uuid::parse_str(id)
+                        .is_ok_and(|parsed| !parsed.is_nil() && parsed.to_string() == id)
+                }))
+        || value.method != StorageMethod::Tunnel
+            && (value.tunnel_id.is_some() || value.zone_id.is_some())
     {
         return Err(bad(
             StatusCode::BAD_REQUEST,
@@ -177,6 +219,9 @@ pub async fn generate(
     if old.request_id.as_deref() == Some(value.request_id.to_string().as_str()) {
         if old.hostname.as_deref() != Some(value.hostname.as_str())
             || old.email.as_deref() != Some(value.email.as_str())
+            || old.method != value.method.as_str()
+            || old.tunnel_id != value.tunnel_id
+            || value.method == StorageMethod::Tunnel && old.zone_id != value.zone_id
         {
             return Err(bad(
                 StatusCode::CONFLICT,
@@ -197,12 +242,17 @@ pub async fn generate(
             "Tunggu satu menit sebelum mencoba penerbitan lagi.",
         ));
     }
-    let dns = services
-        .runtime
-        .dns_status()
-        .await
-        .map_err(super::failure)?;
-    let (zone_id, zone, credential_revision) = provider(&dns, &value.hostname)?;
+    let (zone_id, zone, credential_revision) = if value.method == StorageMethod::Dns01 {
+        let dns = services
+            .runtime
+            .dns_status()
+            .await
+            .map_err(super::failure)?;
+        let (id, name, revision) = provider(&dns, &value.hostname)?;
+        (Some(id), Some(name), Some(revision))
+    } else {
+        (value.zone_id.clone(), None, None)
+    };
     let service = services
         .runtime
         .managed(ManagedStorageRequest::Status {})
@@ -215,9 +265,9 @@ pub async fn generate(
             "Gunakan domain layanan storage yang sudah dikonfigurasi.",
         ));
     }
-    let changed = sqlx::query("UPDATE managed_storage_tls SET revision=revision+1,request_id=?,job_id=?,actor_id=?,hostname=?,email=?,zone_id=?,zone_name=?,credential_revision=?,state='queued',auto_renew=1,last_attempt=?,updated_at=?,error=NULL WHERE id=1 AND revision=? AND state NOT IN ('queued','issuing','configuring')")
+    let changed = sqlx::query("UPDATE managed_storage_tls SET revision=revision+1,request_id=?,job_id=?,actor_id=?,hostname=?,email=?,zone_id=?,zone_name=?,credential_revision=?,method=?,tunnel_id=?,state='queued',auto_renew=?,last_attempt=?,updated_at=?,error=NULL WHERE id=1 AND revision=? AND state NOT IN ('queued','issuing','configuring')")
         .bind(value.request_id.to_string()).bind(uuid::Uuid::new_v4().to_string()).bind(actor.id).bind(&value.hostname).bind(&value.email)
-        .bind(zone_id).bind(zone).bind(credential_revision).bind(now()).bind(now()).bind(value.expected_revision)
+        .bind(zone_id).bind(zone).bind(credential_revision).bind(value.method.as_str()).bind(value.tunnel_id).bind(value.method != StorageMethod::Tunnel).bind(now()).bind(now()).bind(value.expected_revision)
         .execute(&state.pool).await.map_err(db_error)?;
     if changed.rows_affected() != 1 {
         return Err(bad(
@@ -256,7 +306,7 @@ pub(super) async fn finish_manual(
     hostname: &str,
     success: bool,
 ) -> Result<(), Error> {
-    sqlx::query("UPDATE managed_storage_tls SET state=?,auto_renew=0,hostname=?,not_before=NULL,not_after=NULL,renew_at=NULL,request_id=NULL,job_id=NULL,updated_at=?,error=? WHERE id=1 AND revision=? AND state='configuring'")
+    sqlx::query("UPDATE managed_storage_tls SET state=?,method='dns01',tunnel_id=NULL,auto_renew=0,hostname=?,not_before=NULL,not_after=NULL,renew_at=NULL,request_id=NULL,job_id=NULL,updated_at=?,error=? WHERE id=1 AND revision=? AND state='configuring'")
         .bind(if success {"manual"} else {"failed"}).bind(hostname).bind(now())
         .bind(if success {None} else {Some("Pemasangan manual gagal; periksa layanan dan sertifikat sebelum mencoba lagi.")}).bind(revision)
         .execute(pool).await.map_err(db_error)?;
@@ -397,29 +447,76 @@ async fn issue_and_apply(
     row: &Binding,
 ) -> Result<(), &'static str> {
     let host = row.hostname.as_deref().ok_or("Domain tidak tersedia.")?;
-    let email = row.email.as_deref().ok_or("Email tidak tersedia.")?;
-    let revision = row
-        .credential_revision
-        .as_deref()
-        .ok_or("Revisi DNS tidak tersedia.")?;
-    let dns = services
-        .runtime
-        .dns_status()
-        .await
-        .map_err(|_| "DNS-01 tidak tersedia.")?;
-    let (zone_id, zone, current) =
-        provider(&dns, host).map_err(|_| "Konfigurasi DNS-01 berubah.")?;
-    if Some(&zone_id) != row.zone_id.as_ref()
-        || Some(&zone) != row.zone_name.as_ref()
-        || current != revision
-    {
-        return Err("Zona atau token DNS-01 berubah.");
+    if row.method == "tunnel" {
+        let configured = services.runtime.managed(ManagedStorageRequest::ConfigureTunnel { hostname: host.into() }).await
+            .map_err(|_| "Aktivasi origin Tunnel storage gagal. Periksa panel-agent dan layanan storage.")?;
+        if configured.get("error").is_some() {
+            return Err(configuration_failure(&configured));
+        }
+        if configured["configured"] != true
+            || configured["running"] != true
+            || configured["origin_ready"] != true
+            || configured["connection_mode"] != "tunnel"
+            || configured["endpoint"] != format!("https://{host}")
+        {
+            return Err("Origin HTTP loopback storage belum siap; rute Tunnel belum diterbitkan.");
+        }
+        let published = services.runtime.publish_tunnel(row.zone_id.clone().ok_or("Zona Tunnel tidak tersedia.")?, row.tunnel_id.clone().ok_or("Tunnel tidak tersedia.")?, host.into()).await
+            .map_err(|_| "Origin storage lokal siap, tetapi publikasi Tunnel belum berhasil. Periksa konektor lokal aktif, izin management Tunnel/DNS dan konflik hostname; muat ulang sebelum mencoba lagi.")?;
+        if published["published"] != true {
+            return Err(
+                "Publikasi rute storage belum dapat dipastikan; periksa konfigurasi Tunnel sebelum mencoba lagi.",
+            );
+        }
+        let changed = sqlx::query("UPDATE managed_storage_tls SET state='active',auto_renew=0,not_before=NULL,not_after=NULL,renew_at=NULL,updated_at=?,error=NULL WHERE id=1 AND revision=? AND state='issuing'")
+            .bind(now()).bind(row.revision).execute(pool).await.map_err(|_| "Status aktivasi storage gagal disimpan.")?;
+        if changed.rows_affected() != 1 {
+            return Err("Revisi aktivasi storage berubah.");
+        }
+        return Ok(());
     }
-    let certificate = services
-        .runtime
-        .certificate(pool.clone(), host.into(), email.into(), revision.into())
-        .await
-        .map_err(|error| issuance_failure(&error))?;
+    let email = row.email.as_deref().ok_or("Email tidak tersedia.")?;
+    let certificate = if row.method == "http01" {
+        let prepared = services
+            .runtime
+            .managed(ManagedStorageRequest::PrepareHttp {
+                hostname: host.into(),
+            })
+            .await
+            .map_err(
+                |_| "Listener HTTP-01 tidak dapat disiapkan. Periksa panel-agent dan Nginx.",
+            )?;
+        if prepared["prepared"] != true {
+            return Err(
+                "Listener HTTP-01 tidak siap. Periksa konflik domain dan Nginx sebelum mencoba lagi.",
+            );
+        }
+        services.runtime.http_certificate(pool.clone(), host.into(), email.into()).await
+            .map_err(|_| "Validasi HTTP-01 gagal. Arahkan DNS domain storage ke IP publik server dan pastikan port 80 dapat dijangkau.")?
+    } else {
+        let revision = row
+            .credential_revision
+            .as_deref()
+            .ok_or("Revisi DNS tidak tersedia.")?;
+        let dns = services
+            .runtime
+            .dns_status()
+            .await
+            .map_err(|_| "DNS-01 tidak tersedia.")?;
+        let (zone_id, zone, current) =
+            provider(&dns, host).map_err(|_| "Konfigurasi DNS-01 berubah.")?;
+        if Some(&zone_id) != row.zone_id.as_ref()
+            || Some(&zone) != row.zone_name.as_ref()
+            || current != revision
+        {
+            return Err("Zona atau token DNS-01 berubah.");
+        }
+        services
+            .runtime
+            .certificate(pool.clone(), host.into(), email.into(), revision.into())
+            .await
+            .map_err(|error| issuance_failure(&error))?
+    };
     let validity = panel_core::panel_tls::validate_dns_candidate(
         &certificate.chain,
         &certificate.key.0,
@@ -499,7 +596,7 @@ async fn reconcile_job(state: &AppState, row: &Binding) {
             let _ = dispatch(state, row).await;
         }
         Ok(Some(job)) if matches!(job.status.as_str(), "succeeded" | "failed" | "cancelled") => {
-            let _=sqlx::query("UPDATE managed_storage_tls SET state='failed',auto_renew=0,updated_at=?,error='Tugas penerbitan terputus atau dibatalkan; perpanjangan otomatis dijeda. Periksa DNS-01 dan layanan storage, lalu pilih Generate lagi.' WHERE id=1 AND revision=? AND state IN ('queued','issuing')").bind(now()).bind(row.revision).execute(&state.pool).await;
+            let _=sqlx::query("UPDATE managed_storage_tls SET state='failed',auto_renew=0,updated_at=?,error='Tugas aktivasi terputus atau dibatalkan; perpanjangan otomatis dijeda. Periksa koneksi dan layanan storage, lalu aktifkan kembali.' WHERE id=1 AND revision=? AND state IN ('queued','issuing')").bind(now()).bind(row.revision).execute(&state.pool).await;
         }
         _ => {}
     }
@@ -545,6 +642,10 @@ mod tests {
 
     #[derive(Default)]
     struct Runtime {
+        dns_reads: AtomicUsize,
+        http_issued: AtomicUsize,
+        prepared: AtomicUsize,
+        published: AtomicUsize,
         issued: AtomicUsize,
         applied: AtomicUsize,
         fail: AtomicBool,
@@ -554,8 +655,32 @@ mod tests {
         helper_failure: AtomicUsize,
     }
     impl StorageRuntime for Runtime {
+        fn http_certificate(
+            &self,
+            pool: DbPool,
+            hostname: String,
+            email: String,
+        ) -> BoxFuture<'_, Result<StorageCertificate, String>> {
+            self.http_issued.fetch_add(1, Ordering::SeqCst);
+            self.certificate(pool, hostname, email, String::new())
+        }
+        fn publish_tunnel(
+            &self,
+            _zone_id: String,
+            _tunnel_id: String,
+            _hostname: String,
+        ) -> BoxFuture<'_, Result<Value, String>> {
+            Box::pin(async move {
+                self.published.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err("fixture_secret_provider_response".into());
+                }
+                Ok(json!({"published":true}))
+            })
+        }
         fn dns_status(&self) -> BoxFuture<'_, Result<Value, Failure>> {
             Box::pin(async {
+                self.dns_reads.fetch_add(1, Ordering::SeqCst);
                 Ok(
                     json!({"configured":true,"zone_id":"zone","zone_name":"example.test","revision":"revision","pending":[]}),
                 )
@@ -594,6 +719,16 @@ mod tests {
         }
         fn managed(&self, request: ManagedStorageRequest) -> BoxFuture<'_, Result<Value, Failure>> {
             Box::pin(async move {
+                if matches!(request, ManagedStorageRequest::PrepareHttp { .. }) {
+                    self.prepared.fetch_add(1, Ordering::SeqCst);
+                    return Ok(json!({"prepared":true}));
+                }
+                if matches!(request, ManagedStorageRequest::ConfigureTunnel { .. }) {
+                    self.applied.fetch_add(1, Ordering::SeqCst);
+                    return Ok(
+                        json!({"configured":true,"running":true,"origin_ready":true,"connection_mode":"tunnel","endpoint":"https://storage.example.test"}),
+                    );
+                }
                 assert!(matches!(request, ManagedStorageRequest::Configure { .. }));
                 self.applied.fetch_add(1, Ordering::SeqCst);
                 if self.apply_fail.load(Ordering::SeqCst) {
@@ -662,6 +797,55 @@ mod tests {
             transfers: Arc::new(tokio::sync::Semaphore::new(1)),
         };
         (pool, runtime, services, job, payload)
+    }
+    #[tokio::test]
+    async fn tunnel_activation_skips_dns_and_ca_and_never_schedules_renewal() {
+        let (pool, runtime, services, job, payload) = fixture().await;
+        sqlx::query("UPDATE managed_storage_tls SET method='tunnel',tunnel_id='7c03851f-60dd-49d1-a3aa-a2100320e7c9',email='',auto_renew=0").execute(&pool).await.expect("mode");
+        process(&pool, &services, &job, &payload)
+            .await
+            .expect("activate");
+        let row = binding(&pool).await.expect("binding");
+        assert_eq!(row.state, "active");
+        assert!(!row.auto_renew);
+        assert!(row.not_after.is_none() && row.renew_at.is_none());
+        assert_eq!(runtime.dns_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.issued.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.applied.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.published.load(Ordering::SeqCst), 1);
+        assert!(process(&pool, &services, &job, &payload).await.is_err());
+        assert_eq!(runtime.published.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn tunnel_publication_failure_does_not_claim_activation_or_expose_provider_details() {
+        let (pool, runtime, services, job, payload) = fixture().await;
+        sqlx::query("UPDATE managed_storage_tls SET method='tunnel',tunnel_id='7c03851f-60dd-49d1-a3aa-a2100320e7c9',auto_renew=0").execute(&pool).await.expect("mode");
+        runtime.fail.store(true, Ordering::SeqCst);
+        let error = process(&pool, &services, &job, &payload)
+            .await
+            .expect_err("publication failure");
+        assert!(error.contains("lokal siap"));
+        assert!(!error.contains("fixture_secret"));
+        let row = binding(&pool).await.expect("binding");
+        assert_eq!(row.state, "failed");
+        assert!(!row.auto_renew);
+        assert_eq!(runtime.issued.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn public_ip_uses_http_challenge_without_dns_provider_and_preserves_renewal() {
+        let (pool, runtime, services, job, payload) = fixture().await;
+        sqlx::query("UPDATE managed_storage_tls SET method='http01',zone_id=NULL,zone_name=NULL,credential_revision=NULL").execute(&pool).await.expect("mode");
+        process(&pool, &services, &job, &payload)
+            .await
+            .expect("issue HTTP-01");
+        let row = binding(&pool).await.expect("binding");
+        assert_eq!(row.state, "active");
+        assert!(row.auto_renew && row.renew_at.is_some());
+        assert_eq!(runtime.dns_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.http_issued.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.applied.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.published.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn issuance_applies_once_and_keeps_private_material_out_of_metadata() {

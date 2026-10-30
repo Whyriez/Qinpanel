@@ -33,6 +33,12 @@ pub enum ManagedStorageRequest {
     // An empty struct variant enforces deny_unknown_fields; a tagged unit
     // variant would silently consume extra payload fields during deserialization.
     Status {},
+    ConfigureTunnel {
+        hostname: String,
+    },
+    PrepareHttp {
+        hostname: String,
+    },
     Configure {
         hostname: String,
         fullchain_pem: StorageSecret,
@@ -140,6 +146,12 @@ mod tests {
             uuid::Uuid::parse_str("7c03851f-60dd-49d1-a3aa-a2100320e7c9").expect("fixture UUID");
         for request in [
             ManagedStorageRequest::Status {},
+            ManagedStorageRequest::ConfigureTunnel {
+                hostname: "storage.example.test".into(),
+            },
+            ManagedStorageRequest::PrepareHttp {
+                hostname: "storage.example.test".into(),
+            },
             ManagedStorageRequest::Configure {
                 hostname: "storage.example.test".into(),
                 fullchain_pem: StorageSecret("fixture-certificate".into()),

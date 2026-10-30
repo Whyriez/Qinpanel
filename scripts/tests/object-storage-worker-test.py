@@ -125,6 +125,7 @@ class WorkerTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
         self.controller = FixtureController(root / "config", root / "data", root / "unit", root / "nginx")
+        self.controller.acme = root / "acme.conf"
         self.controller.config.mkdir()
         self.controller.data.mkdir()
         self.state = {"schema": 1, "hostname": "storage.example.test", "root": keys("r"), "buckets": {}}
@@ -275,6 +276,121 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.controller.state_path.read_bytes(), old)
         self.assertFalse(self.controller.nginx.exists())
         self.assertEqual(sentinel.read_text(), "original")
+
+    def test_tunnel_wire_needs_only_hostname_and_rejects_untyped_targets(self):
+        for action in ("configure_tunnel", "prepare_http"):
+            value = {"action": action, "hostname": self.state["hostname"]}
+            self.assertEqual(worker.validate_request(value), value)
+            for extra in ("port", "path", "url", "fullchain_pem", "service", "command"):
+                with self.subTest(action=action, extra=extra), self.assertRaises(worker.StorageError):
+                    worker.validate_request(dict(value, **{extra: "untrusted"}))
+
+    def test_tunnel_listener_is_loopback_only_and_preserves_s3_request(self):
+        config = worker.tunnel_template(self.state["hostname"])
+        self.assertIn("listen 127.0.0.1:17891 default_server", config)
+        self.assertNotIn("listen 17891", config)
+        self.assertIn("return 444;", config)
+        self.assertIn("proxy_set_header Host $http_host;", config)
+        self.assertIn("proxy_set_header Authorization $http_authorization;", config)
+        self.assertIn(f"proxy_pass http://unix:{worker.SOCKET};", config)
+        self.assertNotIn("rewrite", config)
+        self.assertNotIn("ssl_certificate", config)
+
+    def test_tunnel_setup_preserves_objects_keys_and_previous_https_during_publication(self):
+        self.controller.allocate(operation())
+        before = self.controller.state()
+        previous_config = worker.nginx_template(before["hostname"], "a" * 64)
+        self.controller.nginx.write_text(previous_config)
+        sentinel = self.controller.data / "objects"
+        sentinel.write_bytes(b"existing object")
+        request = {"action": "configure_tunnel", "hostname": before["hostname"]}
+        with patch.object(worker, "safe_directory"), patch.object(worker, "install_engine"), patch.object(worker, "wait_for_tunnel") as ready, patch.object(worker.ssl, "SSLContext") as ssl_context:
+            result = self.controller.configure(request)
+            self.assertEqual(result["connection_mode"], "tunnel")
+            self.assertTrue(result["origin_ready"])
+            self.assertFalse(result["public_access_verified"])
+            self.assertEqual(result["endpoint"], "https://storage.example.test")
+            self.assertEqual(result["origin_url"], "http://127.0.0.1:17891")
+            ssl_context.assert_not_called()
+            ready.assert_called_once()
+            first = self.controller.nginx.read_text()
+            self.controller.configure(request)
+            self.assertEqual(self.controller.nginx.read_text(), first)
+        self.assertIn(previous_config, first)
+        after = self.controller.state()
+        self.assertEqual(after["root"], before["root"])
+        self.assertEqual(after["buckets"], before["buckets"])
+        self.assertEqual(sentinel.read_bytes(), b"existing object")
+
+    def test_fresh_tunnel_activation_never_requires_or_writes_certificates(self):
+        self.controller.state_path.unlink()
+        (self.controller.config / "s3.json").unlink()
+        with patch.object(worker, "safe_directory"), patch.object(worker, "install_engine"), patch.object(worker, "wait_for_tunnel"), patch.object(worker.ssl, "SSLContext") as tls:
+            result = self.controller.configure({"action": "configure_tunnel", "hostname": self.state["hostname"]})
+            tls.assert_not_called()
+        self.assertTrue(result["configured"] and result["origin_ready"])
+        self.assertEqual(result["connection_mode"], "tunnel")
+        self.assertFalse((self.controller.config / "certificates").exists())
+        self.assertNotIn("listen 443", self.controller.nginx.read_text())
+
+    def test_tunnel_origin_failure_restores_prior_https_state_and_configuration(self):
+        old = self.controller.state_path.read_bytes()
+        self.controller.nginx.write_text(worker.nginx_template(self.state["hostname"], "b" * 64))
+        old_nginx = self.controller.nginx.read_bytes()
+        with patch.object(worker, "safe_directory"), patch.object(worker, "install_engine"), patch.object(worker, "wait_for_tunnel", side_effect=worker.StorageError("loopback not ready")):
+            with self.assertRaisesRegex(worker.StorageError, "Tunnel origin activation.*loopback not ready"):
+                self.controller.configure({"action": "configure_tunnel", "hostname": self.state["hostname"]})
+        self.assertEqual(self.controller.state_path.read_bytes(), old)
+        self.assertEqual(self.controller.nginx.read_bytes(), old_nginx)
+
+    def test_tunnel_port_collision_preserves_prior_state(self):
+        old = self.controller.state_path.read_bytes()
+        probe = MagicMock()
+        probe.__enter__.return_value.bind.side_effect = OSError("occupied")
+        with patch.object(worker, "safe_directory"), patch.object(worker.socket, "socket", return_value=probe), patch.object(worker, "install_engine") as install:
+            with self.assertRaisesRegex(worker.StorageError, "already in use"):
+                self.controller.configure({"action": "configure_tunnel", "hostname": self.state["hostname"]})
+            install.assert_not_called()
+        self.assertEqual(self.controller.state_path.read_bytes(), old)
+
+    def test_status_does_not_equate_engine_health_with_origin_or_public_health(self):
+        with patch.object(worker, "s3_request", side_effect=[200, OSError("listener down")]):
+            result = self.controller.status()
+        self.assertTrue(result["running"])
+        self.assertFalse(result["origin_ready"])
+        self.assertFalse(result["public_access_verified"])
+        self.assertEqual(result["connection_mode"], "https")
+
+    def test_http01_preparation_is_separate_from_tls_and_never_creates_engine_keys(self):
+        before = self.controller.state_path.read_bytes()
+        self.assertTrue(self.controller.prepare_http({"hostname": self.state["hostname"]})["prepared"])
+        self.assertEqual(self.controller.state_path.read_bytes(), before)
+        config = self.controller.acme.read_text()
+        self.assertIn("listen 80;", config)
+        self.assertIn("root /var/lib/panel/acme;", config)
+        self.assertIn("location ^~ /.well-known/acme-challenge/", config)
+        self.assertIn("location / { return 404; }", config)
+        self.assertFalse(self.controller.nginx.exists())
+
+    def test_http01_conflicting_hostname_is_not_taken_over(self):
+        with patch.object(worker, "command", return_value=b"server_name storage.example.test;"):
+            with self.assertRaisesRegex(worker.StorageError, "already used"):
+                self.controller.prepare_http({"hostname": self.state["hostname"]})
+        self.assertFalse(self.controller.acme.exists())
+
+    def test_http01_reload_failure_restores_old_challenge_configuration(self):
+        old = worker.acme_template(self.state["hostname"])
+        self.controller.acme.write_bytes(old.encode())
+        failed = False
+        def command(args, timeout=60):
+            nonlocal failed
+            if args == ["systemctl", "reload", "nginx"] and not failed:
+                failed = True
+                raise worker.StorageError("reload failed")
+            return b""
+        with patch.object(worker, "command", side_effect=command), self.assertRaisesRegex(worker.StorageError, "previous configuration restored"):
+            self.controller.prepare_http({"hostname": self.state["hostname"]})
+        self.assertEqual(self.controller.acme.read_text(), old)
 
     def test_inactive_nginx_is_rejected_before_config_or_data_changes(self):
         before = self.controller.state_path.read_bytes()
