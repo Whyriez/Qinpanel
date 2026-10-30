@@ -12,5 +12,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install native fixture dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y nginx acl openssl ca-certificates python3
+      - name: Verify native fixture readiness logic with mocks
+        run: python3 scripts/tests/managed-storage-native-fixture-test.py
       - name: Run actual engine, systemd and S3 HTTPS acceptance on this disposable VM
         run: sudo env GITHUB_ACTIONS=true QONPANEL_DISPOSABLE_CI=1 python3 scripts/tests/managed-storage-native-test.py

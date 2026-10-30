@@ -18,6 +18,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -106,6 +107,29 @@ def presigned_get(path, keys, now=None, host=HOST):
     return f"{path}?{query}&X-Amz-Signature={signature}"
 
 
+def wait_for_http01(expected, timeout=30):
+    """Reload is asynchronous: require the exact challenge, not just an active unit."""
+    deadline = time.monotonic() + timeout
+    reason = "No HTTP response received."
+    while (remaining := deadline - time.monotonic()) > 0:
+        challenge_connection = http.client.HTTPConnection("127.0.0.1", 80, timeout=min(3, remaining))
+        try:
+            challenge_connection.request("GET", "/.well-known/acme-challenge/native-storage", headers={"host": HOST})
+            response = challenge_connection.getresponse()
+            sample = response.read(len(expected) + 1)
+            matches = sample == expected
+            if response.status == 200 and matches:
+                return
+            reason = f"HTTP {response.status}; sampled_bytes={len(sample)}; expected_bytes={len(expected)}; body_matches={matches}."
+        except (OSError, http.client.HTTPException):
+            reason = "HTTP connection failed or returned an incomplete response."
+        finally:
+            challenge_connection.close()
+        if (remaining := deadline - time.monotonic()) > 0:
+            time.sleep(min(0.5, remaining))
+    raise AssertionError("HTTP-01 challenge did not become ready within the deadline. " + reason)
+
+
 def main():
     if os.environ.get("QONPANEL_DISPOSABLE_CI") != "1" or os.environ.get("GITHUB_ACTIONS") != "true" or sys.platform != "linux" or os.geteuid() != 0:
         raise SystemExit("Only an explicitly authorized disposable GitHub Linux VM may run this test.")
@@ -175,13 +199,9 @@ def main():
             challenge = Path("/var/lib/panel/acme/.well-known/acme-challenge/native-storage")
             challenge.parent.mkdir(parents=True, exist_ok=True)
             challenge.write_text("native HTTP-01 fixture")
-            challenge_connection = http.client.HTTPConnection("127.0.0.1", 80, timeout=10)
             try:
-                challenge_connection.request("GET", "/.well-known/acme-challenge/native-storage", headers={"host": HOST})
-                response = challenge_connection.getresponse()
-                assert (response.status, response.read()) == (200, b"native HTTP-01 fixture")
+                wait_for_http01(b"native HTTP-01 fixture")
             finally:
-                challenge_connection.close()
                 challenge.unlink()
             assert Path("/etc/qonpanel-storage/state.json").read_bytes() == before
             origin = control({"action": "configure_tunnel", "hostname": HOST})
