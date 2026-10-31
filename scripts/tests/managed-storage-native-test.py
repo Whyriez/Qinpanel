@@ -158,6 +158,18 @@ def exercise_listed_object_keys(keys, tunnel=False):
         assert request("GET", path, keys, tunnel=tunnel)[0] == 404
         for remaining in listed[index+1:]:
             assert request("GET", paths[remaining], keys, tunnel=tunnel)[0] == 200, "Deleting a spaced filename must not delete the separate literal-plus filename"
+    # Empty S3 folder markers survive listing through HTTPS and Tunnel origins.
+    marker = prefix + "empty folder +/"
+    marker_path = "/alice-media/" + urllib.parse.quote(marker, safe="/-_.~")
+    assert request("PUT", marker_path, keys, b"", tunnel=tunnel)[0] in (200, 201)
+    status, body = request("GET", "/alice-media?" + query, keys, tunnel=tunnel)
+    assert status == 200
+    tree = ET.fromstring(body)
+    folders = [urllib.parse.unquote_plus(element.text) for element in tree.findall("s3:CommonPrefixes/s3:Prefix", ns)]
+    assert marker in folders, "Empty folder must remain visible in its parent listing"
+    assert request("GET", marker_path, keys, tunnel=tunnel) == (200, b"")
+    assert request("DELETE", marker_path, keys, tunnel=tunnel)[0] in (200, 204)
+    assert request("HEAD", marker_path, keys, tunnel=tunnel)[0] == 404
 
 
 def main():

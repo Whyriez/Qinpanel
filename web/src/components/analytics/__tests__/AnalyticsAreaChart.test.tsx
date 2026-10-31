@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { AnalyticsAreaChart } from '../AnalyticsAreaChart';
 import { SiteTimeseriesPointDto, SiteDeployment } from '../../../types/api';
+import '../../../i18n';
 
 describe('AnalyticsAreaChart Component', () => {
   const mockPoints: SiteTimeseriesPointDto[] = [
@@ -68,7 +69,7 @@ describe('AnalyticsAreaChart Component', () => {
       />
     );
     expect(html).toContain('rel999');
-    expect(html).toContain('🚀');
+    expect(html).toContain('Deploy rel999');
   });
 
   it('renders empty message when points is empty', () => {

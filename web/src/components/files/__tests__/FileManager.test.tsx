@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { FileManager } from '../FileManager';
+import '../../../i18n';
 import { FileManagerPage } from '../../../pages/FileManagerPage';
 
 vi.mock('../../../context/AuthContext', () => ({ useAuth: () => ({user:{id:42,role:'user'},isLoading:false}) }));
@@ -58,21 +59,21 @@ describe('FileManager Component', () => {
       />
     );
 
-    expect(html).toContain('root');
+    expect(html).toContain('Beranda');
     expect(html).toContain('Unggah');
-    expect(html).toContain('Folder Baru');
-    expect(html).toContain('Berkas Baru');
-    expect(html).toContain('Tempat Sampah');
+    expect(html).toContain('Folder baru');
+    expect(html).toContain('Berkas baru');
+    expect(html).toContain('Tempat sampah');
     expect(html).toContain('Kuota:');
-    expect(html).toContain('2 GB');
-    expect(html).toContain('10 GB');
+    expect(html).toContain('2 GiB');
+    expect(html).toContain('10 GiB');
   });
 
   it('renders interactive "Terminal di sini" button in toolbar', () => {
     const html = renderToString(<FileManager />);
 
-    expect(html).toContain('Terminal di sini');
-    expect(html).toContain('Buka terminal di folder ini');
+    expect(html).toContain('Opsi pengelola berkas');
+    expect(html).toContain('aria-expanded="false"');
   });
 
   it('renders collapsible left folder tree and breadcrumbs for nested paths', () => {
@@ -80,7 +81,7 @@ describe('FileManager Component', () => {
       <FileManager initialPath="sites/example.com/public" />
     );
 
-    expect(html).toContain('Pohon Folder');
+    expect(html).toContain('Navigasi folder');
     expect(html).toContain('sites');
     expect(html).toContain('example.com');
     expect(html).toContain('public');
@@ -93,17 +94,17 @@ describe('FileManager Component', () => {
       />
     );
 
-    expect(html).toContain('bg-red-500');
-    expect(html).toContain('4.8 GB');
-    expect(html).toContain('5 GB');
+    expect(html).toContain('fb-quota-high');
+    expect(html).toContain('4,8 GiB');
+    expect(html).toContain('5 GiB');
   });
 
   it('renders standalone FileManagerPage with header and description', () => {
     const html = renderToString(<FileManagerPage initialPath="sites" />);
 
     expect(html).toContain('Pengelola Berkas');
-    expect(html).toContain('Jelajahi, sunting, unggah, dan kelola seluruh berkas hosting dalam ruang terisolasi tenant');
-    expect(html).toContain('root');
+    expect(html).toContain('Susun, sunting, dan kelola berkas project Anda.');
+    expect(html).toContain('Beranda');
     expect(html).toContain('sites');
   });
 });

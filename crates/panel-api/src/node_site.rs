@@ -25,6 +25,68 @@ use crate::routes::AppState;
 pub const MIN_NODE_PORT: u16 = 20000;
 pub const MAX_NODE_PORT: u16 = 29999;
 
+pub(crate) async fn validate_runtime_port(
+    pool: &SqlitePool,
+    site_id: Option<i64>,
+    port: u16,
+) -> Result<(), (StatusCode, String)> {
+    if !(MIN_NODE_PORT..=MAX_NODE_PORT).contains(&port) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Port aplikasi harus dalam rentang terisolasi 20000-29999".into(),
+        ));
+    }
+    let failure = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Pemetaan port tidak dapat diverifikasi".into(),
+        )
+    };
+    let rows: Vec<(i64, i64, String, String)> =
+        sqlx::query_as("SELECT id,user_id,COALESCE(runtime,kind),settings_json FROM sites")
+            .fetch_all(pool)
+            .await
+            .map_err(|_| failure())?;
+    let current_owner = rows.iter().find_map(|(id, owner, _, raw)| {
+        let settings: serde_json::Value = serde_json::from_str(raw).ok()?;
+        (Some(*id) == site_id && settings["port"].as_u64() == Some(u64::from(port)))
+            .then_some(*owner)
+    });
+    let conflict = rows.iter().any(|(id, owner, runtime, raw)| {
+        if Some(*id) == site_id {
+            return false;
+        }
+        let Ok(settings) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return false;
+        };
+        match runtime.as_str() {
+            "nodejs" | "python" => settings["port"].as_u64() == Some(u64::from(port)),
+            // Reserve even a stale proxy target. Deleting/changing its original
+            // application must never hand its Nginx connection to a new tenant.
+            // DNS names also reserve explicit ports, without a second DNS lookup.
+            "proxy" => {
+                proxy_reserved_port(&settings) == Some(port) && current_owner != Some(*owner)
+            }
+            _ => false,
+        }
+    });
+    if conflict {
+        return Err((
+            StatusCode::CONFLICT,
+            "Port aplikasi sudah terdaftar atau masih dirujuk proxy project lain".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn proxy_reserved_port(settings: &serde_json::Value) -> Option<u16> {
+    settings["upstream_url"]
+        .as_str()?
+        .parse::<axum::http::Uri>()
+        .ok()?
+        .port_u16()
+}
+
 /// Request payload to trigger a Node.js process action.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct NodeSiteActionApiRequest {
@@ -84,22 +146,27 @@ pub struct NodeSiteStatusApiResponse {
 /// Allocates an unused port in the range 20000..=29999.
 /// Checks uniqueness across all database sites and verifies local TCP bind availability.
 pub async fn allocate_node_site_port(pool: &SqlitePool) -> Result<u16, String> {
-    // 1. Fetch all currently assigned ports from DB sites table
-    let rows =
-        sqlx::query("SELECT settings_json FROM sites WHERE kind = 'nodejs' OR runtime = 'nodejs'")
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Gagal membaca port situs dari database: {}", e))?;
-
+    // Runtime and retained proxy configurations both reserve ports.
+    let rows = sqlx::query("SELECT settings_json FROM sites")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Gagal membaca port situs dari database: {e}"))?;
     let mut used_ports = HashSet::new();
     for row in rows {
-        if let Some(port) = row
+        let settings = row
             .try_get::<String, _>("settings_json")
             .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|val| val.get("port").and_then(|p| p.as_u64()))
-        {
-            used_ports.insert(port as u16);
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        if let Some(settings) = settings {
+            if let Some(port) = settings["port"]
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+            {
+                used_ports.insert(port);
+            }
+            if let Some(port) = proxy_reserved_port(&settings) {
+                used_ports.insert(port);
+            }
         }
     }
 
@@ -228,7 +295,7 @@ pub async fn action_node_site_handler(
         }
     };
 
-    let (resolved_linux_name, _resolved_linux_uid) =
+    let (resolved_linux_name, resolved_linux_uid) =
         match crate::tenant_context::execution_identity(&user) {
             Ok(identity) => identity,
             Err((status, message)) => {
@@ -261,7 +328,7 @@ pub async fn action_node_site_handler(
         let job_req = NodeSiteJobRequest {
             site_id: format!("site_{}", site.id),
             username: linux_uname.to_string(),
-            uid: user.id as u32,
+            uid: resolved_linux_uid,
             node_version: node_ver.clone(),
             app_dir: app_dir.clone(),
             job_type: NodeSiteJobType::NpmInstall,
@@ -426,7 +493,7 @@ pub async fn run_node_site_job_handler(
         }
     };
 
-    let (resolved_linux_name, _resolved_linux_uid) =
+    let (resolved_linux_name, resolved_linux_uid) =
         match crate::tenant_context::execution_identity(&user) {
             Ok(identity) => identity,
             Err((status, message)) => {
@@ -484,7 +551,7 @@ pub async fn run_node_site_job_handler(
     let req = NodeSiteJobRequest {
         site_id: format!("site_{}", site.id),
         username: linux_uname.to_string(),
-        uid: user.id as u32,
+        uid: resolved_linux_uid,
         node_version: node_ver,
         app_dir,
         job_type,
@@ -620,14 +687,10 @@ pub async fn update_node_site_settings_handler(
         settings.insert("node_version".to_string(), serde_json::Value::String(norm));
     }
     if let Some(port) = payload.port {
-        if port < 1024 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({ "error": "Port harus berupa port unprivileged (>= 1024)" }),
-                ),
-            )
-                .into_response();
+        if let Err((status, message)) =
+            validate_runtime_port(&state.pool, Some(site.id), port).await
+        {
+            return (status, Json(serde_json::json!({"error":message}))).into_response();
         }
         settings.insert("port".to_string(), serde_json::json!(port));
         settings.insert(

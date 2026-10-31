@@ -12,6 +12,7 @@ pub mod cron;
 pub mod database_web;
 pub mod databases;
 pub mod dns01;
+mod domain_policy;
 pub mod email;
 pub mod env_vars;
 pub mod files;
@@ -32,6 +33,7 @@ pub mod panel_url_settings;
 pub mod php;
 pub mod plans;
 pub mod processes;
+mod proxy_policy;
 pub mod proxy_site;
 pub mod public_url;
 pub mod python_site;
@@ -742,6 +744,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .merge(SwaggerUi::new("/swagger-ui").url("/api/v1/openapi.json", api_doc))
         .fallback(static_files::static_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::middleware::api_security_boundary,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             public_url::middleware,

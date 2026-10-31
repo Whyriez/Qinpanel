@@ -181,6 +181,12 @@ async fn setup_test_context() -> TestContext {
         .await
         .expect("create bob");
 
+    // A local proxy must target an active runtime owned by the same tenant.
+    for port in [20050, 20051] {
+        sqlx::query("INSERT INTO sites(user_id,kind,docroot,status,settings_json,created_at,updated_at) VALUES(?,'nodejs','/fixture','active',?,1,1)")
+            .bind(alice_user.id).bind(serde_json::json!({"port":port}).to_string())
+            .execute(&pool).await.expect("owned runtime");
+    }
     let auth_config = AuthConfig {
         session_duration_secs: 3600,
         max_failed_attempts: 5,
@@ -250,7 +256,7 @@ async fn test_create_proxy_site_loopback_and_get_settings() {
     let create_payload = CreateStaticSiteRequest {
         domain: "proxy-app.test".to_string(),
         kind: Some("proxy".to_string()),
-        upstream_url: Some("http://127.0.0.1:3000".to_string()),
+        upstream_url: Some("http://127.0.0.1:20050".to_string()),
         preserve_host: Some(true),
         websocket_support: Some(true),
         proxy_connect_timeout: Some("15s".to_string()),
@@ -299,7 +305,7 @@ async fn test_create_proxy_site_loopback_and_get_settings() {
         .expect("body")
         .to_bytes();
     let settings: ProxySiteSettingsDto = serde_json::from_slice(&get_body).expect("settings json");
-    assert_eq!(settings.upstream_url, "http://127.0.0.1:3000");
+    assert_eq!(settings.upstream_url, "http://127.0.0.1:20050");
     assert!(settings.preserve_host);
     assert!(settings.websocket_support);
     assert_eq!(settings.proxy_connect_timeout.as_deref(), Some("15s"));
@@ -315,7 +321,7 @@ async fn test_external_upstream_ssrf_guard_enforcement() {
     let ext_payload = CreateStaticSiteRequest {
         domain: "ext-app.test".to_string(),
         kind: Some("proxy".to_string()),
-        upstream_url: Some("https://api.external.com".to_string()),
+        upstream_url: Some("https://93.184.216.34".to_string()),
         ..Default::default()
     };
 
@@ -403,7 +409,7 @@ async fn test_external_upstream_ssrf_guard_enforcement() {
         .to_bytes();
     let settings: ProxySiteSettingsDto = serde_json::from_slice(&get_body).expect("settings json");
     assert!(settings.allow_external_upstream);
-    assert_eq!(settings.upstream_url, "https://api.external.com");
+    assert_eq!(settings.upstream_url, "https://93.184.216.34");
 
     // 4. Hardcoded Blacklist is STILL blocked even when allow_external_upstream == true:
     // a) Cloud metadata IP (169.254.169.254)
@@ -492,7 +498,7 @@ async fn test_proxy_settings_update_and_header_validation() {
     let create_payload = CreateStaticSiteRequest {
         domain: "headers-test.com".to_string(),
         kind: Some("proxy".to_string()),
-        upstream_url: Some("http://127.0.0.1:5000".to_string()),
+        upstream_url: Some("http://127.0.0.1:20050".to_string()),
         ..Default::default()
     };
 
@@ -523,7 +529,7 @@ async fn test_proxy_settings_update_and_header_validation() {
 
     // 1. Update with valid custom headers & options
     let update_payload = UpdateProxySiteSettingsRequest {
-        upstream_url: Some("http://127.0.0.1:5001".to_string()),
+        upstream_url: Some("http://127.0.0.1:20051".to_string()),
         preserve_host: Some(false),
         websocket_support: Some(true),
         proxy_connect_timeout: Some("30s".to_string()),
@@ -563,7 +569,7 @@ async fn test_proxy_settings_update_and_header_validation() {
         .expect("body")
         .to_bytes();
     let updated: ProxySiteSettingsDto = serde_json::from_slice(&put_body).expect("updated json");
-    assert_eq!(updated.upstream_url, "http://127.0.0.1:5001");
+    assert_eq!(updated.upstream_url, "http://127.0.0.1:20051");
     assert!(!updated.preserve_host);
     assert_eq!(updated.proxy_buffering, Some(false));
     assert_eq!(updated.custom_request_headers.len(), 1);
@@ -615,10 +621,18 @@ async fn test_proxy_upstream_probe_endpoint() {
     let ctx = setup_test_context().await;
 
     // Start a mock upstream server on loopback
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
+    let mut available = None;
+    for port in 20052..=20152 {
+        if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            available = Some(listener);
+            break;
+        }
+    }
+    let listener = available.expect("available isolated upstream port");
     let port = listener.local_addr().expect("local addr").port();
+    sqlx::query("INSERT INTO sites(user_id,kind,docroot,status,settings_json,created_at,updated_at) VALUES(?,'nodejs','/fixture','active',?,1,1)")
+        .bind(ctx.alice_id).bind(serde_json::json!({"port":port}).to_string())
+        .execute(&ctx.pool).await.expect("registered probe runtime");
 
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {

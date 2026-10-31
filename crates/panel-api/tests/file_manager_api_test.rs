@@ -44,7 +44,15 @@ fn extract_cookie_value(cookie_header: &str, cookie_name: &str) -> Option<String
 }
 
 async fn setup_test_context() -> TestContext {
-    let tmp = tempdir().expect("tempdir");
+    // A Windows drive colon cannot appear in a seven-field POSIX passwd
+    // record. Keep this mock home relative to a temporary directory in cwd;
+    // the production NSS validator remains strict on every platform.
+    let tmp = if cfg!(windows) {
+        tempfile::tempdir_in(".")
+    } else {
+        tempdir()
+    }
+    .expect("tempdir");
     let db_file = tmp.path().join("panel.db");
 
     #[cfg(unix)]
@@ -52,7 +60,13 @@ async fn setup_test_context() -> TestContext {
     #[cfg(not(unix))]
     let sock_path = tmp.path().join("agent.port");
 
-    let home_base = tmp.path().join("home");
+    let home_base = if cfg!(windows) {
+        std::path::PathBuf::from(".")
+            .join(tmp.path().file_name().expect("temporary fixture name"))
+            .join("home")
+    } else {
+        tmp.path().join("home")
+    };
     fs::create_dir_all(&home_base).expect("create home base");
 
     // Setup home dirs for alice and bob

@@ -193,6 +193,14 @@ impl JobRunner {
 
         // Check idempotency if client provided specific ID
         if let Some(existing) = self.job_repo.find_by_id(&job_id).await? {
+            if existing.user_id != user_id
+                || existing.name != name
+                || existing.payload_json != payload_json
+            {
+                return Err(DbError::Conflict(
+                    "Identitas tugas sudah digunakan untuk operasi berbeda".into(),
+                ));
+            }
             return Ok((existing, true));
         }
 

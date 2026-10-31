@@ -128,6 +128,19 @@ pub async fn activate(
         .await
         .map_err(DbError::from)
         .map_err(db_error)?;
+    let tenant_domain: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM domains WHERE lower(name)=lower(?))")
+            .bind(&target.host)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(DbError::from)
+            .map_err(db_error)?;
+    if tenant_domain {
+        return Err(problem(
+            StatusCode::CONFLICT,
+            "Hostname ini sudah dipakai project tenant. Gunakan hostname administrasi terpisah.",
+        ));
+    }
     let active: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND status='active' AND role='admin')",
     )

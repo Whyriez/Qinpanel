@@ -199,6 +199,103 @@
 .storage-file-row .storage-file-name small { font-size: 11px; }
 .storage-page .storage-search input,.storage-page .storage-filter-controls select { font-size: 12px; }
 .storage-row-type,.storage-row-size,.storage-row-date,.storage-list-heading,.storage-pagination .storage-note,.storage-pagination button { font-size: 11px; }
+
+/* File search, folder creation and application settings share the bucket workspace. */
+.storage-search-form { display: flex; flex: 1 1 450px; min-width: 0; gap: 8px; }
+.storage-search-form .storage-search { flex: 1; max-width: none; min-width: 130px; transition: border-color 120ms, box-shadow 120ms; }
+.storage-search:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent); background: var(--surface); color: var(--primary); }
+.storage-page .storage-search input:focus-visible { outline: none; box-shadow: none; }
+.storage-search input::-webkit-search-cancel-button { display: none; }
+.storage-page .storage-search-form > select { width: auto; flex: none; max-width: 165px; min-height: 38px; margin: 0; padding: 6px 9px; font-size: 12px; }
+.storage-page .storage-search .storage-search-clear { min-width: 28px; width: 28px; min-height: 28px; padding: 0; background: transparent; border: 0; color: var(--ink-muted); }
+.storage-search-feedback { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 24px; border-block: 1px solid var(--line); background: var(--bg); font-size: 12px; }
+.storage-search-feedback p { margin: 0; overflow-wrap: anywhere; }
+.storage-page .storage-search-feedback button { flex: none; padding: 6px 9px; min-height: 34px; font-size: 11px; }
+.storage-folder-dialog { width: min(100%, 480px); padding: 24px; }
+.storage-folder-dialog h3 { font-size: 19px; }
+.storage-folder-dialog form { display: grid; gap: 18px; margin-top: 24px; }
+.storage-folder-dialog label { font-size: 13px; }
+.storage-folder-dialog input:not([type=checkbox]) { display: block; width: 100%; padding: 11px 12px; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); font-size: 14px; color: var(--ink); }
+.storage-folder-dialog .storage-check { align-items: flex-start; line-height: 1.6; }
+.storage-folder-dialog .storage-check input { margin-top: 3px !important; }
+.storage-folder-dialog .storage-editor-footer button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 12px; border-radius: 6px; font-size: 12px; }
+.storage-folder-dialog .storage-editor-footer button:not(.button-primary) { border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+.storage-folder-destination { display: flex; gap: 8px; align-items: flex-start; padding: 12px; margin: 0; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); font: 12px/1.7 var(--font-mono, monospace); overflow-wrap: anywhere; }
+.storage-folder-destination svg { flex: none; margin-top: 2px; }
+.storage-editor-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); padding-top: 18px; margin-top: 6px; }
+.storage-editor-footer > .storage-note { margin: 0 auto 0 0; }
+.storage-section-heading { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+.storage-section-heading > div { flex: 1; min-width: 0; }
+.storage-section-heading h3,.storage-section-heading h4 { margin: 0; font-size: 16px; font-weight: 600; }
+.storage-section-heading p { margin: 6px 0 0; max-width: 580px; }
+.storage-section-icon { display: grid; place-items: center; flex: none; height: 40px; width: 40px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink-muted); }
+.storage-rules-form { padding-top: 24px; }
+.storage-rules-fieldset { min-width: 0; border: 0; padding: 0; margin: 24px 0 0; }
+.storage-rules-fieldset legend { font-size: 12px; font-weight: 600; margin-bottom: 12px; }
+.storage-permission-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+.storage-permission-card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.storage-permission-card.is-enabled { border-color: color-mix(in srgb, var(--primary) 25%, var(--line)); }
+.storage-permission-label { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.storage-permission-label > svg { flex: none; color: var(--ink-muted); }
+.storage-permission-label > strong { flex: 1; font-weight: 500; }
+.storage-page .storage-permission-label input { appearance: none; flex: none; width: 32px; height: 20px; min-height: 20px; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 20px; background: var(--line); position: relative; cursor: pointer; }
+.storage-permission-label input::after { content: ''; position: absolute; top: 2px; left: 2px; height: 14px; width: 14px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 2px #0002; transition: transform 120ms; }
+.storage-page .storage-permission-label input:checked { background: var(--primary); border-color: var(--primary); }
+.storage-permission-label input:checked::after { transform: translateX(12px); background: white; }
+.storage-rule-limits { display: grid; grid-template-columns: minmax(140px, .6fr) minmax(0, 1fr); gap: 24px; }
+.storage-rule-limits label { font-size: 12px; }
+.storage-rule-limits .storage-note { display: block; margin: 8px 0 0; }
+.storage-number-field { display: flex; align-items: center; margin-top: 7px; border: 1px solid var(--line); border-radius: 6px; padding-right: 12px; }
+.storage-page .storage-number-field input { border: 0; margin: 0; background: transparent; }
+.storage-number-field > span { font-size: 12px; color: var(--ink-muted); }
+.storage-extension-presets { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 16px; font-size: 11px; color: var(--ink-muted); }
+.storage-page .storage-extension-presets button { min-height: 30px; padding: 5px 9px; font-size: 11px; border-radius: 5px; }
+.storage-extension-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.storage-extension-chips span { padding: 4px 8px; font: 11px var(--font-mono, monospace); border-radius: 4px; background: var(--bg); border: 1px solid var(--line); }
+.storage-rules-form .storage-editor-footer { margin-top: 24px; }
+.storage-connect-workspace { display: grid; gap: 20px; }
+.storage-connect-workspace > .storage-section-heading { margin-bottom: 0; align-items: center; }
+.storage-settings-card { min-width: 0; border: 1px solid var(--line); border-radius: 9px; padding: 20px; }
+.storage-settings-card h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.storage-settings-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.storage-settings-card-heading p { margin: 5px 0 0; }
+.storage-provider-tag { border-radius: 4px; border: 1px solid var(--line); padding: 5px 7px; font-size: 10px; color: var(--ink-muted); white-space: nowrap; }
+.storage-connect-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; margin: 22px 0 0; }
+.storage-connect-fields > div:first-child { grid-column: 1/-1; }
+.storage-connect-fields dt { font-size: 11px; color: var(--ink-muted); margin-bottom: 7px; }
+.storage-connect-fields dd { display: flex; align-items: flex-start; gap: 8px; margin: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); padding: 8px 10px; }
+.storage-connect-fields code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; line-height: 1.9; user-select: all; }
+.storage-page .storage-connect-fields .storage-copy-control { flex: none; border: 0; background: transparent; padding: 0; min-height: 26px; min-width: 26px; }
+.storage-key-card { display: flex; align-items: center; gap: 14px; }
+.storage-key-card > div { flex: 1; min-width: 0; }
+.storage-key-card p { margin: 6px 0 0; }
+.storage-connect-workspace .storage-project { margin: 20px 0; border: 0; padding: 0; }
+.storage-connect-workspace .storage-project label { font-size: 12px; }
+.storage-env-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border: 1px solid var(--line); border-bottom: 0; border-radius: 6px 6px 0 0; background: var(--bg); font-size: 12px; color: var(--ink-muted); }
+.storage-page .storage-env-header button { padding: 4px 8px; min-height: 30px; border: 0; font-size: 11px; background: transparent; }
+.storage-connect-workspace .storage-code { margin: 0; border-radius: 0 0 6px 6px; padding: 16px; font-size: 12px; }
+.storage-connect-note { display: flex; align-items: flex-start; gap: 8px; margin: 14px 0 0; }
+.storage-connect-note > svg { flex: none; margin-top: 3px; }
+@media(max-width: 1100px) { .storage-permission-grid { grid-template-columns: minmax(0,1fr); } .storage-permission-card { gap: 6px; } }
+@media(max-width: 640px) {
+  .storage-search-form { flex-direction: column; width: 100%; }
+  .storage-search-form .storage-search { min-height: 44px; flex-basis: auto; }
+  .storage-page .storage-search-form > select { max-width: none; width: 100%; min-height: 44px; font-size: 14px; }
+  .storage-page .storage-search-form input { font-size: 16px; }
+  .storage-page .storage-search .storage-search-clear { min-width: 36px; min-height: 40px; }
+  .storage-search-feedback { align-items: flex-start; padding: 12px 16px; }
+  .storage-folder-dialog { padding: 20px 16px; }
+  .storage-folder-dialog input:not([type=checkbox]) { font-size: 16px; }
+  .storage-section-heading { flex-wrap: wrap; }
+  .storage-section-heading > div { flex-basis: calc(100% - 54px); }
+  .storage-settings-card { padding: 16px; }
+  .storage-connect-fields,.storage-rule-limits { grid-template-columns: minmax(0,1fr); gap: 18px; }
+  .storage-key-card { flex-wrap: wrap; }
+  .storage-key-card > .storage-section-icon { display: none; }
+  .storage-key-card > div { flex-basis: 100%; }
+  .storage-page .storage-extension-presets button { min-height: 40px; }
+  .storage-editor-footer > .storage-note { flex-basis: 100%; margin-bottom: 5px; }
+}
 .storage-detail-heading h3,.storage-object-url > label,.storage-file-information h4 { font-size: 12px; }
 .storage-object-detail .storage-object-title { font-size: 14px; }
 .storage-object-url .storage-note,.storage-detail-meta > span:last-child,.storage-url-field textarea,.storage-link-actions button,.storage-link-actions a { font-size: 11px; }

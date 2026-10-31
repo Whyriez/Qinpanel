@@ -1,9 +1,13 @@
+import { useTranslation } from 'react-i18next';
+import { FileBrowserListing, FileInspector, fileSize } from './FileBrowserView';
+import '../../styles/file-browser.css';
 import { ModalOverlay } from '../ui/ModalOverlay';
 import React, {
   useState,
   useEffect,
   useCallback,
   useRef,
+  useId,
 } from 'react';
 import {
   Folder,
@@ -37,8 +41,12 @@ import {
   X,
   AlertTriangle,
   RotateCcw,
-  Sparkles,
   Key,
+  PanelLeft,
+  ArrowUp,
+  Info,
+  EyeOff,
+  MoreHorizontal,
 } from 'lucide-react';
 import { FsEntry, ViewMode, SortField, SortDirection, TrashedItem, UploadItem, DiskQuotaStatus } from '../../types/files';
 import { createFileClient } from '../../api/files';
@@ -59,14 +67,6 @@ export interface FileManagerProps {
   quotaInfo?: DiskQuotaStatus;
 }
 
-interface TreeNode {
-  name: string;
-  path: string;
-  isExpanded: boolean;
-  children: TreeNode[];
-  isLoading: boolean;
-}
-
 export const FileManager: React.FC<FileManagerProps> = ({
   tenant,
   siteId,
@@ -76,6 +76,17 @@ export const FileManager: React.FC<FileManagerProps> = ({
   quotaInfo,
   onNavigateTerminal,
 }) => {
+  const { i18n } = useTranslation();
+  const formId = useId();
+  const english = i18n.language.startsWith('en');
+  const text = (id: string, en: string) => english ? en : id;
+  const [showDetails, setShowDetails] = useState(true);
+  const [mobileDetails, setMobileDetails] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [totalEntries, setTotalEntries] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const listingSequence = useRef(0);
   const fileApi = React.useMemo(() => createFileClient(tenant), [tenant]);
   const { fetchFileList, createFolder, renameFile, moveFile, copyFile, moveToTrash, fetchTrashList, restoreTrash, emptyTrash, compressArchive, extractArchive, initUpload, uploadChunk } = fileApi;
   // Navigation and files state
@@ -89,19 +100,20 @@ export const FileManager: React.FC<FileManagerProps> = ({
   const [sortBy, setSortBy] = useState<SortField>('name');
   const [sortOrder, setSortOrder] = useState<SortDirection>('asc');
   const [searchFilter, setSearchFilter] = useState('');
-  const [showHidden] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
 
   // Selection state
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
 
   // Tree directory state (Left Sidebar)
-  const [isTreeCollapsed, setIsTreeCollapsed] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches);
-  const [treeRoot] = useState<TreeNode[]>([
-    { name: 'sites', path: 'sites', isExpanded: true, children: [], isLoading: false },
-    { name: 'tmp', path: 'tmp', isExpanded: false, children: [], isLoading: false },
-  ]);
-
+  const [isTreeCollapsed, setIsTreeCollapsed] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const collapse = () => { if (media.matches) setIsTreeCollapsed(true); };
+    media.addEventListener('change', collapse);
+    return () => media.removeEventListener('change', collapse);
+  }, []);
   // Internal File Clipboard (Copy / Cut)
   const [clipboard, setClipboard] = useState<{
     paths: string[];
@@ -109,7 +121,10 @@ export const FileManager: React.FC<FileManagerProps> = ({
   } | null>(null);
 
   // Upload Tray State
-  const [uploadQueue, setUploadQueue] = useState<UploadItem[]>([]);
+  const [uploadQueue, setUploadQueue] = useState<(UploadItem & { scope?: string })[]>([]);
+  const uploadQueueRef = useRef(uploadQueue);
+  useEffect(() => { uploadQueueRef.current = uploadQueue; }, [uploadQueue]);
+  useEffect(() => { setUploadQueue([]); }, [tenant]);
   const [isUploadTrayMinimized, setIsUploadTrayMinimized] = useState(false);
   const [isDragOverDropzone, setIsDragOverDropzone] = useState(false);
 
@@ -124,6 +139,9 @@ export const FileManager: React.FC<FileManagerProps> = ({
     y: number;
     targetEntry?: FsEntry;
   } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const contextReturnFocus = useRef<HTMLElement | null>(null);
+  const toolsRef = useRef<HTMLDivElement>(null);
 
   // Modal Dialogs State
   const [isNewFolderOpen, setIsNewFolderOpen] = useState(false);
@@ -209,7 +227,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
   // Load Directory Entries
   // ----------------------------------------------------
   const loadFiles = useCallback(async (path: string = currentPath) => {
-    setIsLoading(true);
+    const revision = ++listingSequence.current;
+    setIsLoading(true); setLoadingMore(false);
     setErrorMessage(null);
     try {
       const res = await fetchFileList({
@@ -218,18 +237,24 @@ export const FileManager: React.FC<FileManagerProps> = ({
         sort_order: sortOrder,
         show_hidden: showHidden,
       });
-      setEntries(res.entries || []);
+      if (revision !== listingSequence.current) return;
+      setEntries(res.entries || []); setTotalEntries(res.total); setHasMore(res.has_more);
       setSelectedPaths(new Set());
     } catch (err: unknown) {
       const e = err as Error;
-      setErrorMessage(e.message || 'Gagal memuat direktori berkas');
+      if (revision === listingSequence.current) { setEntries([]); setErrorMessage(e.message || 'Gagal memuat direktori berkas'); }
     } finally {
-      setIsLoading(false);
+      if (revision === listingSequence.current) setIsLoading(false);
     }
   }, [currentPath, sortBy, sortOrder, showHidden, fetchFileList]);
 
   useEffect(() => {
-    loadFiles(currentPath);
+    void loadFiles(currentPath);
+    return () => { listingSequence.current++; };
+  }, [loadFiles, currentPath]);
+  const refreshAfterUpload = useRef(() => { void loadFiles(currentPath); });
+  useEffect(() => {
+    refreshAfterUpload.current = () => { void loadFiles(currentPath); };
   }, [loadFiles, currentPath]);
 
   // Load Trash Items
@@ -303,10 +328,6 @@ export const FileManager: React.FC<FileManagerProps> = ({
     });
   };
 
-  const formatPermissions = (mode: number) => {
-    return (mode & 0o777).toString(8).padStart(3, '0');
-  };
-
   const getFileIcon = (entry: FsEntry) => {
     if (entry.is_dir) {
       return <Folder className="h-4 w-4 text-amber-500 shrink-0" />;
@@ -370,7 +391,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
   }, [currentPath]);
 
   const handleNavigatePath = (path: string) => {
-    setCurrentPath(path);
+    setSearchFilter(''); setSelectedPaths(new Set()); setLastSelectedIndex(null); setCurrentPath(path);
+    if (window.matchMedia('(max-width: 760px)').matches) setIsTreeCollapsed(true);
   };
 
   const openEditorForFile = async (path: string, sizeBytes: number = 0) => {
@@ -444,21 +466,13 @@ export const FileManager: React.FC<FileManagerProps> = ({
     }
   };
 
-  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.checked) {
-      setSelectedPaths(new Set(sortedAndFilteredEntries.map((e) => e.path)));
-    } else {
-      setSelectedPaths(new Set());
-    }
-  };
-
   // ----------------------------------------------------
   // Keyboard Shortcuts (Ctrl+A, Delete, F2, Ctrl+C, Ctrl+V, Ctrl+F, Esc)
   // ----------------------------------------------------
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (activeEditor || e.defaultPrevented || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
-      const isInput = ['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName);
+      if (document.querySelector('[role="dialog"][aria-modal="true"]') || activeEditor || e.defaultPrevented || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
+      const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName);
       if (isInput) return;
 
       // Select All
@@ -553,12 +567,13 @@ export const FileManager: React.FC<FileManagerProps> = ({
   const handleContextMenu = (e: React.MouseEvent, entry?: FsEntry) => {
     e.preventDefault();
     e.stopPropagation();
+    contextReturnFocus.current = e.currentTarget as HTMLElement;
     if (entry && !selectedPaths.has(entry.path)) {
       setSelectedPaths(new Set([entry.path]));
     }
     setContextMenu({
-      x: e.clientX,
-      y: e.clientY,
+      x: Math.max(8, Math.min(e.clientX || e.currentTarget.getBoundingClientRect().left, window.innerWidth - 208)),
+      y: Math.max(8, Math.min(e.clientY || e.currentTarget.getBoundingClientRect().bottom, window.innerHeight - 420)),
       targetEntry: entry,
     });
   };
@@ -568,6 +583,18 @@ export const FileManager: React.FC<FileManagerProps> = ({
     window.addEventListener('click', handleClickOutside);
     return () => window.removeEventListener('click', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const frame = window.requestAnimationFrame(() => contextMenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus());
+    return () => { window.cancelAnimationFrame(frame); if (contextReturnFocus.current?.isConnected) contextReturnFocus.current.focus({ preventScroll: true }); };
+  }, [contextMenu]);
+  useEffect(() => {
+    if (!toolsOpen) return;
+    const close = (event: PointerEvent) => { if (!toolsRef.current?.contains(event.target as Node)) setToolsOpen(false); };
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [toolsOpen]);
 
   // ----------------------------------------------------
   // File Mutation Actions (Create, Rename, Delete, etc.)
@@ -671,15 +698,17 @@ export const FileManager: React.FC<FileManagerProps> = ({
       totalSize: f.size,
       uploadedSize: 0,
       status: 'pending',
+      scope: tenant,
     }));
 
     setUploadQueue((prev) => [...prev, ...newItems]);
     setIsUploadTrayMinimized(false);
   };
 
-  // Process upload items sequentially
+  // Progress updates must not cancel the currently active upload.
+  const activeUploadId = uploadQueue.find(item => item.scope === tenant && (item.status === 'pending' || item.status === 'uploading'))?.id;
   useEffect(() => {
-    const pendingItem = uploadQueue.find((it) => it.status === 'pending');
+    const pendingItem = uploadQueueRef.current.find(item => item.id === activeUploadId);
     if (!pendingItem) return;
 
     let isAborted = false;
@@ -697,6 +726,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
         while (offset < pendingItem.totalSize && !isAborted) {
           const chunkBlob = pendingItem.file.slice(offset, offset + chunkSize);
           const chunkRes = await uploadChunk(init.upload_id, offset, chunkBlob);
+          if (isAborted) return;
           offset = chunkRes.current_offset;
 
           setUploadQueue((prev) =>
@@ -716,9 +746,10 @@ export const FileManager: React.FC<FileManagerProps> = ({
                 : it
             )
           );
-          loadFiles(currentPath);
+          refreshAfterUpload.current();
         }
       } catch (err: unknown) {
+        if (isAborted) return;
         const e = err as Error;
         setUploadQueue((prev) =>
           prev.map((it) =>
@@ -735,7 +766,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
     return () => {
       isAborted = true;
     };
-  }, [uploadQueue, currentPath, loadFiles]);
+  }, [activeUploadId, initUpload, uploadChunk]);
 
   // ----------------------------------------------------
   // Drag and Drop (Internal & Desktop File Drop)
@@ -858,667 +889,52 @@ export const FileManager: React.FC<FileManagerProps> = ({
     stopMarquee();
   };
 
+  const selectedEntry = selectedPaths.size === 1 ? entries.find(entry => selectedPaths.has(entry.path)) : undefined;
+  const renameEntry = (entry: FsEntry) => { setRenameTarget(entry); setRenameNewName(entry.name); setIsRenameOpen(true); };
+  const toggleEntry = (entry: FsEntry) => setSelectedPaths(previous => { const next = new Set(previous); if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path); return next; });
+  const changeSort = (field: SortField) => { if (sortBy === field) setSortOrder(value => value === 'asc' ? 'desc' : 'asc'); else { setSortBy(field); setSortOrder('asc'); } };
+  const openTerminal = () => { setToolsOpen(false); if (onNavigateTerminal) onNavigateTerminal(currentPath); else { setTerminalCwd(currentPath); setIsTerminalOpen(true); setTerminalOpenRequest(value => value + 1); } };
+  const loadMoreFiles = async () => {
+    if (loadingMore || isLoading || !hasMore) return;
+    const revision = listingSequence.current; setLoadingMore(true);
+    try {
+      const result = await fetchFileList({ path: currentPath || undefined, sort_by: sortBy, sort_order: sortOrder, show_hidden: showHidden, offset: entries.length });
+      if (revision === listingSequence.current) { setEntries(previous => [...previous, ...result.entries.filter(entry => !previous.some(existing => existing.path === entry.path))]); setTotalEntries(result.total); setHasMore(result.has_more); }
+    } catch (cause) { if (revision === listingSequence.current) setErrorMessage(cause instanceof Error ? cause.message : 'Gagal memuat berkas berikutnya.'); }
+    finally { if (revision === listingSequence.current) setLoadingMore(false); }
+  };
+  const inspector = selectedEntry ? <FileInspector entry={selectedEntry} english={english} icon={getFileIcon(selectedEntry)} onClose={() => { setShowDetails(false); setMobileDetails(false); }} onOpen={() => { setMobileDetails(false); handleOpenItem(selectedEntry); }} onPreview={() => { setMobileDetails(false); openPreviewForFile(selectedEntry.path, selectedEntry.size_bytes); }} onDownload={() => window.open(fileApi.url(`/api/v1/files/download?path=${encodeURIComponent(selectedEntry.path)}`), '_blank', 'noopener')} onRename={() => { setMobileDetails(false); renameEntry(selectedEntry); }} onPermissions={() => { setMobileDetails(false); openPermissionForEntry(selectedEntry); }} /> : null;
+
   // ----------------------------------------------------
   // RENDER UI
   // ----------------------------------------------------
   return (
-    <div
-      className="flex flex-col h-[calc(100vh-4rem)] border border-[var(--line)] rounded-[var(--radius-lg)] bg-[var(--surface)] text-[var(--foreground)] overflow-hidden shadow-xs"
-    >
-      {/* Hidden File Upload Input */}
-      <input
-        type="file"
-        multiple
-        ref={uploadInputRef}
-        className="hidden"
-        onChange={(e) => handleFilesSelectedForUpload(e.target.files)}
-      />
-
-      {/* 1. Header Toolbar & Quota Info */}
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[var(--line)] bg-[var(--surface)]">
-        {/* Left: Breadcrumbs & Path */}
-        <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-x-auto text-xs py-1">
-          {title && (
-            <span className="font-semibold text-[var(--foreground)] mr-1 hidden sm:inline truncate max-w-[160px]">
-              {title}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={() => handleNavigatePath('')}
-            className={`flex items-center gap-1 px-2 py-1 rounded-[var(--radius-sm)] font-medium transition-colors ${
-              currentPath === ''
-                ? 'bg-[var(--surface-hover)] text-blue-500 font-semibold'
-                : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--surface-hover)]'
-            }`}
-          >
-            <HardDrive className="h-3.5 w-3.5" />
-            <span>root</span>
-          </button>
-
-          {breadcrumbSegments.map((seg, idx) => (
-            <React.Fragment key={seg.path}>
-              <ChevronRight className="h-3 w-3 text-[var(--line)] shrink-0" />
-              <button
-                type="button"
-                onClick={() => handleNavigatePath(seg.path)}
-                className={`px-2 py-1 rounded-[var(--radius-sm)] truncate max-w-[140px] transition-colors ${
-                  idx === breadcrumbSegments.length - 1
-                    ? 'bg-[var(--surface-hover)] text-blue-500 font-semibold'
-                    : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--surface-hover)]'
-                }`}
-                title={seg.name}
-              >
-                {seg.name}
-              </button>
-            </React.Fragment>
-          ))}
-        </div>
-
-        {/* Right: Quota Meter & Terminal Button */}
-        <div className="flex items-center gap-3 shrink-0 text-xs">
-          {quotaInfo && (
-            <div className="flex items-center gap-2 px-2.5 py-1 rounded-[var(--radius-sm)] bg-[var(--background)] border border-[var(--line)]">
-              <span className="text-[var(--muted-foreground)] text-[11px]">Kuota:</span>
-              <span className="font-mono text-[11px] font-medium">
-                {formatFileSize(quotaInfo.usedBytes)} / {formatFileSize(quotaInfo.limitBytes)}
-              </span>
-              <div className="w-16 h-1.5 rounded-full bg-[var(--surface-hover)] overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all duration-300 ${
-                    quotaInfo.percentage > 90
-                      ? 'bg-red-500'
-                      : quotaInfo.percentage > 75
-                      ? 'bg-amber-500'
-                      : 'bg-emerald-500'
-                  }`}
-                  style={{ width: `${Math.min(quotaInfo.percentage, 100)}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Tombol Terminal di sini */}
-          <div className="relative group">
-            <button
-              type="button"
-              onClick={() => {
-                if (onNavigateTerminal) {
-                  onNavigateTerminal(currentPath);
-                } else {
-                  setTerminalCwd(currentPath);
-                  setIsTerminalOpen(true);
-                  setTerminalOpenRequest(previous => previous + 1);
-                }
-              }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--surface-hover)] hover:bg-[var(--surface-active)] text-[var(--foreground)] transition-colors text-xs font-medium cursor-pointer"
-              title="Buka terminal di folder ini"
-              ref={terminalTrigger}
-            >
-              <Terminal className="h-3.5 w-3.5 text-emerald-500" />
-              <span>Terminal di sini</span>
-            </button>
-          </div>
-
-          {/* Tombol Salin SSH */}
-          <div className="relative group">
-            <button
-              type="button"
-              onClick={() => {
-                setActiveSshPath(currentPath);
-                setIsSshModalOpen(true);
-              }}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--surface-hover)] hover:bg-[var(--surface-active)] text-[var(--foreground)] transition-colors text-xs font-medium cursor-pointer"
-              title="Salin perintah koneksi SSH & SFTP"
-            >
-              <Key className="h-3.5 w-3.5 text-blue-500" />
-              <span>Salin SSH</span>
-            </button>
-          </div>
-        </div>
+    <div className="fb-manager" aria-label={title}>
+      <input type="file" multiple ref={uploadInputRef} className="hidden" aria-label={text('Pilih berkas untuk diunggah', 'Choose files to upload')} onChange={event => handleFilesSelectedForUpload(event.target.files)} />
+      <header className="fb-toolbar"><div className="fb-location"><button type="button" className="fb-icon-button" aria-label={text('Tampilkan navigasi folder', 'Toggle folder navigation')} aria-expanded={!isTreeCollapsed} onClick={() => setIsTreeCollapsed(value => !value)}><PanelLeft size={17} /></button><nav aria-label={text('Lokasi berkas', 'File location')}><button type="button" onClick={() => handleNavigatePath('')}><HardDrive size={15} />{text('Beranda', 'Home')}</button>{breadcrumbSegments.map((segment, index) => <React.Fragment key={segment.path}><ChevronRight size={13} /><button type="button" title={segment.name} aria-current={index === breadcrumbSegments.length - 1 ? 'location' : undefined} onClick={() => handleNavigatePath(segment.path)}>{segment.name}</button></React.Fragment>)}</nav></div>
+        <div className="fb-toolbar-actions"><button type="button" className="fb-new-file" onClick={() => setIsNewFileOpen(true)}><FilePlus size={15} />{text('Berkas baru', 'New file')}</button><button type="button" onClick={() => setIsNewFolderOpen(true)}><FolderPlus size={15} />{text('Folder baru', 'New folder')}</button><button type="button" className="fb-primary" onClick={() => uploadInputRef.current?.click()}><Upload size={15} />{text('Unggah', 'Upload')}</button></div>
+      </header>
+      <div className="fb-controls"><div className="fb-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label={text('Saring nama berkas', 'Filter file names')} placeholder={text('Cari dalam daftar berkas...', 'Search the file listing...')} value={searchFilter} onChange={event => setSearchFilter(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setSearchFilter(''); } }} />{searchFilter && <button type="button" className="fb-icon-button" aria-label={text('Hapus pencarian', 'Clear search')} onClick={() => setSearchFilter('')}><X size={14} /></button>}</div>
+        <div className="fb-view-controls"><button type="button" className="fb-deep-search" onClick={() => setIsSearchOpen(true)} title={text('Cari nama dan isi berkas (Ctrl+F)', 'Search file names and contents (Ctrl+F)')}><Search size={15} />{text('Pencarian lengkap', 'Advanced search')}</button><button type="button" className="fb-icon-button" disabled={isLoading} onClick={() => void loadFiles(currentPath)} aria-label={text('Segarkan berkas', 'Refresh files')}><RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} /></button><div className="fb-view-switch" role="group" aria-label={text('Tampilan berkas', 'File view')}><button type="button" aria-label={text('Tampilan rinci', 'List view')} title="Tampilan Rinci" aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}><LayoutList size={16} /></button><button type="button" aria-label={text('Tampilan grid', 'Grid view')} title="Tampilan Grid" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}><LayoutGrid size={16} /></button></div><div className="fb-tools" ref={toolsRef} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setToolsOpen(false); terminalTrigger.current?.focus(); } }}><button type="button" className="fb-icon-button" aria-label={text('Opsi pengelola berkas', 'File manager options')} aria-expanded={toolsOpen} ref={terminalTrigger} onClick={() => setToolsOpen(value => !value)}><MoreHorizontal size={18} /></button>{toolsOpen && <div className="fb-tools-menu"><label><input type="checkbox" checked={showHidden} onChange={event => setShowHidden(event.target.checked)} /><EyeOff size={15} />{text('Tampilkan berkas tersembunyi', 'Show hidden files')}</label><button type="button" onClick={openTerminal} title="Buka terminal di folder ini"><Terminal size={15} />{text('Terminal di sini', 'Terminal here')}</button><button type="button" onClick={() => { setToolsOpen(false); setActiveSshPath(currentPath); setIsSshModalOpen(true); }}><Key size={15} />SSH / SFTP</button><button type="button" onClick={() => { setToolsOpen(false); void loadTrash(); setIsTrashOpen(true); }}><Trash2 size={15} />{text('Tempat sampah', 'Trash')}</button></div>}</div></div>
       </div>
-
-      {/* 2. Action Ribbon */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-[var(--line)] bg-[var(--surface)]/70 text-xs">
-        {/* Left Action Buttons */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <button
-            type="button"
-            onClick={() => uploadInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-xs transition-colors"
-          >
-            <Upload className="h-3.5 w-3.5" />
-            <span>Unggah</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsNewFolderOpen(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] border border-[var(--line)] hover:bg-[var(--surface-hover)] transition-colors font-medium"
-          >
-            <FolderPlus className="h-3.5 w-3.5 text-amber-500" />
-            <span>Folder Baru</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsNewFileOpen(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] border border-[var(--line)] hover:bg-[var(--surface-hover)] transition-colors font-medium"
-          >
-            <FilePlus className="h-3.5 w-3.5 text-blue-500" />
-            <span>Berkas Baru</span>
-          </button>
-
-            <button
-              type="button"
-              disabled={selectedPaths.size === 0}
-              onClick={() => setIsCompressOpen(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] border border-[var(--line)] hover:bg-[var(--surface-hover)] transition-colors font-medium disabled:opacity-50 disabled:cursor-default"
-            >
-              <Archive className="h-3.5 w-3.5 text-purple-500" />
-              <span>Arsipkan</span>
-            </button>
-
-          {clipboard && (
-            <button
-              type="button"
-              onClick={handlePasteClipboard}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] bg-emerald-600/10 text-emerald-600 border border-emerald-500/20 hover:bg-emerald-600/20 transition-colors font-medium"
-            >
-              <ClipboardPaste className="h-3.5 w-3.5" />
-              <span>Tempel ({clipboard.paths.length})</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => {
-              loadTrash();
-              setIsTrashOpen(true);
-            }}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-md)] border border-[var(--line)] hover:bg-[var(--surface-hover)] transition-colors text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-            title="Buka Tempat Sampah"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span>Tempat Sampah</span>
-          </button>
+      <div className="fb-selection-slot">{selectedPaths.size > 0 ? <div className="fb-selection-bar" role="region" aria-label={text('Tindakan berkas terpilih', 'Selected file actions')}><span><strong>{selectedPaths.size}</strong> {text('terpilih', 'selected')}</span><div>{selectedEntry && <><button type="button" onClick={() => handleOpenItem(selectedEntry)}><Folder size={15} />{text('Buka', 'Open')}</button><button type="button" className="fb-mobile-detail-button" onClick={() => setMobileDetails(true)}><Info size={15} />{text('Detail', 'Details')}</button><button type="button" className="fb-desktop-detail-button" aria-pressed={showDetails} onClick={() => setShowDetails(value => !value)}><Info size={15} />{text('Detail', 'Details')}</button><button type="button" onClick={() => renameEntry(selectedEntry)}><Edit2 size={15} />{text('Ganti nama', 'Rename')}</button></>}<button type="button" onClick={() => setClipboard({ paths: [...selectedPaths], operation: 'copy' })}><Copy size={15} />{text('Salin', 'Copy')}</button><button type="button" onClick={() => setClipboard({ paths: [...selectedPaths], operation: 'cut' })}><Scissors size={15} />{text('Potong', 'Cut')}</button><button type="button" onClick={() => setIsCompressOpen(true)}><Archive size={15} />{text('Arsipkan', 'Archive')}</button>{selectedEntry && <button type="button" onClick={() => openPermissionForEntry(selectedEntry)}><ShieldAlert size={15} />{text('Izin', 'Permissions')}</button>}<button type="button" className="fb-danger" onClick={() => setIsDeleteConfirmOpen(true)}><Trash2 size={15} />{text('Hapus', 'Delete')}</button></div><button type="button" className="fb-icon-button" aria-label={text('Batalkan pilihan', 'Clear selection')} onClick={() => setSelectedPaths(new Set())}><X size={15} /></button></div> : <div className="fb-list-caption"><h2>{currentPath.split('/').filter(Boolean).at(-1) || text('Berkas saya', 'My files')}</h2><span>{isLoading ? text('Memuat...', 'Loading...') : `${entries.length} item`}</span></div>}</div>
+      {clipboard && <div className="fb-clipboard"><ClipboardPaste size={15} /><span>{clipboard.paths.length} {text('item siap', 'items ready')} {clipboard.operation === 'copy' ? text('disalin', 'to copy') : text('dipindahkan', 'to move')}</span><button type="button" onClick={() => void handlePasteClipboard()}>{text('Tempel di sini', 'Paste here')}</button><button type="button" className="fb-icon-button" aria-label={text('Kosongkan clipboard', 'Clear clipboard')} onClick={() => setClipboard(null)}><X size={14} /></button></div>}
+      <div className="fb-body" data-navigation-open={!isTreeCollapsed}>
+        {!isTreeCollapsed && <aside className="fb-sidebar" aria-label={text('Navigasi folder', 'Folder navigation')}><header><span>{text('Lokasi', 'Locations')}</span><button type="button" className="fb-icon-button" aria-label={text('Tutup navigasi folder', 'Close folder navigation')} onClick={() => setIsTreeCollapsed(true)}><PanelLeft size={15} /></button></header><button type="button" className="fb-home-link" aria-current={!currentPath ? 'location' : undefined} onClick={() => handleNavigatePath('')}><HardDrive size={16} />{text('Berkas saya', 'My files')}</button>{currentPath && <button type="button" className="fb-home-link" onClick={() => handleNavigatePath(currentPath.split('/').slice(0, -1).join('/'))}><ArrowUp size={15} />{text('Folder induk', 'Parent folder')}</button>}<div className="fb-sidebar-caption">{text('Folder di lokasi ini', 'Folders in this location')}</div><div className="fb-folder-links">{entries.filter(entry => entry.is_dir).map(entry => <button type="button" key={entry.path} onClick={() => handleNavigatePath(entry.path)}><Folder size={16} /><span>{entry.name}</span><ChevronRight size={12} /></button>)}{!isLoading && !entries.some(entry => entry.is_dir) && <p>{text('Tidak ada subfolder', 'No subfolders')}</p>}</div><div className="fb-sidebar-bottom"><button type="button" onClick={() => { void loadTrash(); setIsTrashOpen(true); }}><Trash2 size={16} />{text('Tempat sampah', 'Trash')}</button><p><ShieldAlert size={13} />{text('Ruang berkas akun hosting Anda', 'Your hosting account files')}</p></div></aside>}
+        <div ref={fileContainerRef} className={`fb-viewport select-none overflow-auto relative ${isDragOverDropzone ? 'is-dragging' : ''}`} onPointerDown={handlePointerDownForMarquee} onPointerMove={handlePointerMoveForMarquee} onPointerUp={handlePointerUpForMarquee} onPointerCancel={stopMarquee} onLostPointerCapture={stopMarquee} onScrollCapture={() => { const drag = marqueeDrag.current; if (drag) updateMarquee(drag.clientX, drag.clientY); }} onContextMenu={event => handleContextMenu(event)} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+          {isDragOverDropzone && <div className="fb-drop-overlay"><Upload size={32} /><strong>{text('Lepaskan berkas untuk mengunggah', 'Drop files to upload')}</strong><span>{currentPath || text('Beranda', 'Home')}</span></div>}
+          {rubberBandBox && <div className="absolute border border-blue-500 pointer-events-none z-20 fb-marquee" style={{ left: Math.min(rubberBandBox.startX, rubberBandBox.currentX), top: Math.min(rubberBandBox.startY, rubberBandBox.currentY), width: Math.abs(rubberBandBox.currentX - rubberBandBox.startX), height: Math.abs(rubberBandBox.currentY - rubberBandBox.startY) }} />}
+          {isLoading ? <div role="status" className="fb-loading"><span className="sr-only">{text('Memuat berkas...', 'Loading files...')}</span>{[0,1,2,3,4,5].map(value => <div key={value} />)}</div> : errorMessage ? <div className="fb-error" role="alert"><AlertTriangle size={20} /><h3>{text('Berkas belum dapat dimuat', 'Files could not be loaded')}</h3><p>{errorMessage}</p><button type="button" onClick={() => void loadFiles(currentPath)}>{text('Coba lagi', 'Retry')}</button></div> : sortedAndFilteredEntries.length ? <FileBrowserListing entries={sortedAndFilteredEntries} selected={selectedPaths} view={viewMode} sortBy={sortBy} sortOrder={sortOrder} onSort={changeSort} onSelect={handleItemClick} onToggle={toggleEntry} onSelectAll={checked => setSelectedPaths(new Set(checked ? sortedAndFilteredEntries.map(entry => entry.path) : []))} onOpen={handleOpenItem} onMenu={handleContextMenu} icon={getFileIcon} english={english} /> : <div className="fb-empty"><span><Folder size={30} /></span><h3>{searchFilter ? text('Tidak ada berkas yang cocok', 'No matching files') : text('Folder ini masih kosong', 'This folder is empty')}</h3><p>{searchFilter ? text('Coba nama lain atau gunakan pencarian lengkap untuk menelusuri subfolder dan isi berkas.', 'Try another name or use advanced search for subfolders and file contents.') : text('Unggah berkas atau buat folder untuk mulai menata project Anda.', 'Upload files or create a folder to organize your project.')}</p>{searchFilter ? <button type="button" onClick={() => setSearchFilter('')}>{text('Hapus pencarian', 'Clear search')}</button> : <button type="button" className="fb-primary" onClick={() => uploadInputRef.current?.click()}><Upload size={15} />{text('Unggah berkas', 'Upload files')}</button>}</div>}
+          {!isLoading && !errorMessage && hasMore && <div className="fb-load-more"><p>{text('Pencarian cepat menyaring berkas yang sudah dimuat.', 'Quick search filters the loaded files.')}</p><button type="button" disabled={loadingMore} onClick={() => void loadMoreFiles()}>{loadingMore ? text('Memuat...', 'Loading...') : text('Muat lebih banyak', 'Load more')}</button></div>}
         </div>
-
-        {/* Right Search & Controls */}
-        <div className="flex items-center gap-2">
-          {/* Quick Client Filter */}
-          <div className="relative">
-            <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]" />
-            <input
-              type="text"
-              placeholder="Saring..."
-              value={searchFilter}
-              onChange={(e) => setSearchFilter(e.target.value)}
-              className="pl-8 pr-2 py-1 text-xs rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--background)] text-[var(--foreground)] w-28 focus:w-40 transition-all focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-          </div>
-
-          {/* Deep Content Search Modal Trigger */}
-          <button
-            type="button"
-            onClick={() => setIsSearchOpen(true)}
-            className="p-1.5 rounded-[var(--radius-md)] border border-[var(--line)] hover:bg-[var(--surface-hover)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
-            title="Pencarian Mendalam (Ctrl+F)"
-          >
-            <Sparkles className="h-3.5 w-3.5 text-blue-500" />
-          </button>
-
-          {/* Refresh Button */}
-          <button
-            type="button"
-            onClick={() => loadFiles(currentPath)}
-            className="p-1.5 rounded-[var(--radius-md)] border border-[var(--line)] hover:bg-[var(--surface-hover)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
-            title="Segarkan Berkas"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-          </button>
-
-          {/* List / Grid Toggle */}
-          <div className="flex items-center rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--background)] p-0.5">
-            <button
-              type="button"
-              onClick={() => setViewMode('list')}
-              className={`p-1 rounded-[var(--radius-sm)] transition-colors ${
-                viewMode === 'list'
-                  ? 'bg-[var(--surface)] text-[var(--foreground)] shadow-xs'
-                  : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'
-              }`}
-              title="Tampilan Rinci"
-            >
-              <LayoutList className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('grid')}
-              className={`p-1 rounded-[var(--radius-sm)] transition-colors ${
-                viewMode === 'grid'
-                  ? 'bg-[var(--surface)] text-[var(--foreground)] shadow-xs'
-                  : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'
-              }`}
-              title="Tampilan Grid"
-            >
-              <LayoutGrid className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </div>
+        {selectedEntry && showDetails && !rubberBandBox && <aside className="fb-inspector-desktop">{inspector}</aside>}
       </div>
-
-      {/* 3. Main Body: Split View (Directory Tree + Files View) */}
-      <div className="flex flex-1 min-h-0 relative overflow-hidden">
-        {/* Left: Collapsible Directory Tree */}
-        <div
-          className={`border-r border-[var(--line)] bg-[var(--surface)]/50 flex flex-col transition-all duration-200 ${
-            isTreeCollapsed ? 'w-0 opacity-0 overflow-hidden border-none' : 'w-56 shrink-0'
-          }`}
-        >
-          <div className="p-2 border-b border-[var(--line)] text-[11px] font-semibold text-[var(--muted-foreground)] uppercase tracking-wider flex items-center justify-between">
-            <span>Pohon Folder</span>
-            <button
-              type="button"
-              onClick={() => setIsTreeCollapsed(true)}
-              className="text-[var(--muted-foreground)] hover:text-[var(--foreground)] p-0.5"
-            >
-              <ChevronRight className="h-3 w-3 rotate-180" />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-2 space-y-1 text-xs">
-            <button
-              type="button"
-              onClick={() => handleNavigatePath('')}
-              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-[var(--radius-sm)] text-left transition-colors ${
-                currentPath === ''
-                  ? 'bg-blue-500/10 text-blue-500 font-medium'
-                  : 'text-[var(--foreground)] hover:bg-[var(--surface-hover)]'
-              }`}
-            >
-              <HardDrive className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">root</span>
-            </button>
-
-            {treeRoot.map((node) => (
-              <div key={node.path} className="space-y-0.5">
-                <button
-                  type="button"
-                  onClick={() => handleNavigatePath(node.path)}
-                  className={`w-full flex items-center gap-1.5 px-2 py-1 rounded-[var(--radius-sm)] text-left transition-colors ${
-                    currentPath === node.path || currentPath.startsWith(`${node.path}/`)
-                      ? 'bg-blue-500/10 text-blue-500 font-medium'
-                      : 'text-[var(--foreground)] hover:bg-[var(--surface-hover)]'
-                  }`}
-                >
-                  <Folder className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                  <span className="truncate">{node.name}</span>
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Tree Expand Toggle when collapsed */}
-        {isTreeCollapsed && (
-          <button
-            type="button"
-            onClick={() => setIsTreeCollapsed(false)}
-            className="absolute left-0 top-2 z-10 p-1 rounded-r border border-l-0 border-[var(--line)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] shadow-xs"
-            title="Buka Pohon Folder"
-          >
-            <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-        )}
-
-        {/* Right: Files Container (with Dropzone & Rubber Band) */}
-        <div
-          ref={fileContainerRef}
-          onPointerDown={handlePointerDownForMarquee}
-          onPointerMove={handlePointerMoveForMarquee}
-          onPointerUp={handlePointerUpForMarquee}
-          onPointerCancel={stopMarquee}
-          onLostPointerCapture={stopMarquee}
-          onScrollCapture={() => {
-            const drag = marqueeDrag.current;
-            if (drag) updateMarquee(drag.clientX, drag.clientY);
-          }}
-          onContextMenu={(e) => handleContextMenu(e)}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          className={`flex-1 min-w-0 overflow-auto bg-[var(--background)] relative p-3 select-none ${
-            isDragOverDropzone ? 'ring-2 ring-blue-500 ring-inset bg-blue-500/5' : ''
-          }`}
-        >
-          {/* Dropzone Overlay Visual */}
-          {isDragOverDropzone && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-blue-500/10 backdrop-blur-xs z-30 pointer-events-none">
-              <Upload className="h-10 w-10 text-blue-500 animate-bounce mb-2" />
-              <p className="text-sm font-semibold text-blue-500">
-                Lepaskan berkas di sini untuk mengunggah ke folder aktif
-              </p>
-            </div>
-          )}
-
-          {/* Rubber Band Selection Box */}
-          {rubberBandBox && (
-            <div
-              className="absolute border border-blue-500 bg-blue-500/15 pointer-events-none z-20 rounded-xs"
-              style={{
-                left: `${Math.min(rubberBandBox.startX, rubberBandBox.currentX)}px`,
-                top: `${Math.min(rubberBandBox.startY, rubberBandBox.currentY)}px`,
-                width: `${Math.abs(rubberBandBox.currentX - rubberBandBox.startX)}px`,
-                height: `${Math.abs(rubberBandBox.currentY - rubberBandBox.startY)}px`,
-              }}
-            />
-          )}
-
-          {/* Loading Skeleton */}
-          {isLoading && (
-            <div className="space-y-2 py-4">
-              {[1, 2, 3, 4, 5, 6].map((i) => (
-                <div
-                  key={i}
-                  className="h-9 w-full rounded-[var(--radius-sm)] bg-[var(--surface-hover)] animate-pulse"
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Error State */}
-          {!isLoading && errorMessage && (
-            <div className="p-4 rounded-[var(--radius-md)] border border-red-500/30 bg-red-500/10 text-red-500 flex items-center justify-between text-xs">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span>{errorMessage}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => loadFiles(currentPath)}
-                className="px-2 py-1 rounded bg-red-600 text-white font-medium hover:bg-red-700"
-              >
-                Coba Lagi
-              </button>
-            </div>
-          )}
-
-          {/* Empty State */}
-          {!isLoading && !errorMessage && sortedAndFilteredEntries.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16 text-center text-[var(--muted-foreground)]">
-              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--surface-hover)] text-[var(--muted-foreground)] mb-3">
-                <Folder className="h-7 w-7 stroke-1" />
-              </div>
-              <h4 className="text-sm font-semibold text-[var(--foreground)] mb-1">
-                Direktori ini masih kosong
-              </h4>
-              <p className="text-xs max-w-sm mb-4">
-                Unggah berkas dari perangkat Anda atau buat folder baru untuk memulai pengelolaan web.
-              </p>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => uploadInputRef.current?.click()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs shadow-xs"
-                >
-                  <Upload className="h-3.5 w-3.5" />
-                  <span>Unggah Berkas</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsNewFolderOpen(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--radius-md)] border border-[var(--line)] hover:bg-[var(--surface-hover)] font-medium text-xs"
-                >
-                  <FolderPlus className="h-3.5 w-3.5" />
-                  <span>Folder Baru</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* LIST VIEW */}
-          {!isLoading && !errorMessage && sortedAndFilteredEntries.length > 0 && viewMode === 'list' && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="border-b border-[var(--line)] text-[var(--muted-foreground)] font-semibold select-none">
-                    <th className="py-2 px-2.5 w-8">
-                      <input
-                        type="checkbox"
-                        checked={
-                          selectedPaths.size > 0 &&
-                          selectedPaths.size === sortedAndFilteredEntries.length
-                        }
-                        onChange={handleSelectAll}
-                        className="rounded border-[var(--line)] text-blue-600"
-                      />
-                    </th>
-                    <th
-                      className="py-2 px-2 cursor-pointer hover:text-[var(--foreground)]"
-                      onClick={() => {
-                        if (sortBy === 'name') setSortOrder((o) => (o === 'asc' ? 'desc' : 'asc'));
-                        else {
-                          setSortBy('name');
-                          setSortOrder('asc');
-                        }
-                      }}
-                    >
-                      Nama
-                    </th>
-                    <th
-                      className="py-2 px-2.5 w-24 cursor-pointer hover:text-[var(--foreground)]"
-                      onClick={() => {
-                        if (sortBy === 'size') setSortOrder((o) => (o === 'asc' ? 'desc' : 'asc'));
-                        else {
-                          setSortBy('size');
-                          setSortOrder('asc');
-                        }
-                      }}
-                    >
-                      Ukuran
-                    </th>
-                    <th
-                      className="py-2 px-2.5 w-36 cursor-pointer hover:text-[var(--foreground)]"
-                      onClick={() => {
-                        if (sortBy === 'modified')
-                          setSortOrder((o) => (o === 'asc' ? 'desc' : 'asc'));
-                        else {
-                          setSortBy('modified');
-                          setSortOrder('asc');
-                        }
-                      }}
-                    >
-                      Diubah
-                    </th>
-                    <th className="py-2 px-2.5 w-16">Izin</th>
-                    <th className="py-2 px-2.5 w-20">Pemilik</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[var(--line)]/50">
-                  {sortedAndFilteredEntries.map((entry, idx) => {
-                    const isSelected = selectedPaths.has(entry.path);
-                    return (
-                      <tr
-                        key={entry.path}
-                        data-file-item="true"
-                        data-path={entry.path}
-                        draggable
-                        onDragStart={(e) => {
-                          const paths = selectedPaths.has(entry.path)
-                            ? Array.from(selectedPaths)
-                            : [entry.path];
-                          e.dataTransfer.setData('application/panel-files', JSON.stringify(paths));
-                        }}
-                        onClick={(e) => handleItemClick(entry, idx, e)}
-                        onDoubleClick={() => handleOpenItem(entry)}
-                        onContextMenu={(e) => handleContextMenu(e, entry)}
-                        className={`transition-colors cursor-pointer group ${
-                          isSelected
-                            ? 'bg-blue-500/10 font-medium'
-                            : 'hover:bg-[var(--surface-hover)]'
-                        }`}
-                      >
-                        <td className="py-2 px-2.5">
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => {}}
-                            className="rounded border-[var(--line)] text-blue-600 pointer-events-none"
-                          />
-                        </td>
-                        <td className="py-2 px-2 font-medium flex items-center gap-2 truncate">
-                          {getFileIcon(entry)}
-                          <span className="truncate">{entry.name}</span>
-                        </td>
-                        <td className="py-2 px-2.5 text-[var(--muted-foreground)] font-mono text-[11px]">
-                          {entry.is_dir ? '—' : formatFileSize(entry.size_bytes)}
-                        </td>
-                        <td className="py-2 px-2.5 text-[var(--muted-foreground)]">
-                          {formatDate(entry.modified_at)}
-                        </td>
-                        <td className="py-2 px-2.5 font-mono text-[11px] text-[var(--muted-foreground)]">
-                          {formatPermissions(entry.mode)}
-                        </td>
-                        <td className="py-2 px-2.5 text-[var(--muted-foreground)] truncate">
-                          {entry.owner_user}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* GRID VIEW */}
-          {!isLoading && !errorMessage && sortedAndFilteredEntries.length > 0 && viewMode === 'grid' && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-              {sortedAndFilteredEntries.map((entry, idx) => {
-                const isSelected = selectedPaths.has(entry.path);
-                return (
-                  <div
-                    key={entry.path}
-                    data-file-item="true"
-                    data-path={entry.path}
-                    draggable
-                    onDragStart={(e) => {
-                      const paths = selectedPaths.has(entry.path)
-                        ? Array.from(selectedPaths)
-                        : [entry.path];
-                      e.dataTransfer.setData('application/panel-files', JSON.stringify(paths));
-                    }}
-                    onClick={(e) => handleItemClick(entry, idx, e)}
-                    onDoubleClick={() => handleOpenItem(entry)}
-                    onContextMenu={(e) => handleContextMenu(e, entry)}
-                    className={`flex flex-col items-center justify-center p-3 rounded-[var(--radius-md)] border text-center transition-all cursor-pointer relative group ${
-                      isSelected
-                        ? 'border-blue-500 bg-blue-500/10 shadow-xs'
-                        : 'border-[var(--line)] bg-[var(--surface)] hover:border-blue-500/40 hover:bg-[var(--surface-hover)]'
-                    }`}
-                  >
-                    <div className="absolute top-1.5 left-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => {}}
-                        className={`rounded border-[var(--line)] text-blue-600 pointer-events-none ${
-                          isSelected ? 'opacity-100' : ''
-                        }`}
-                      />
-                    </div>
-                    <div className="h-10 w-10 flex items-center justify-center mb-2">
-                      {React.cloneElement(getFileIcon(entry), { className: 'h-8 w-8 shrink-0' })}
-                    </div>
-                    <span className="text-xs font-medium truncate w-full" title={entry.name}>
-                      {entry.name}
-                    </span>
-                    <span className="text-[10px] text-[var(--muted-foreground)] font-mono mt-0.5">
-                      {entry.is_dir ? 'Folder' : formatFileSize(entry.size_bytes)}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 4. Floating Action Bar when Items are Selected */}
-      {selectedPaths.size > 0 && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2 rounded-full border border-[var(--line)] bg-[var(--surface)] shadow-lg text-xs z-30 animate-in fade-in slide-in-from-bottom-2 duration-150">
-          <span className="font-semibold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500">
-            {selectedPaths.size} terpilih
-          </span>
-
-          <button
-            type="button"
-            onClick={() => setIsCompressOpen(true)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-[var(--surface-hover)] font-medium"
-          >
-            <Archive className="h-3.5 w-3.5 text-purple-500" />
-            <span>Arsipkan</span>
-          </button>
-
-          {selectedPaths.size === 1 && (
-            <button
-              type="button"
-              onClick={() => {
-                const targetPath = Array.from(selectedPaths)[0];
-                const entry = entries.find((it) => it.path === targetPath);
-                if (entry) openPermissionForEntry(entry);
-              }}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-[var(--surface-hover)] font-medium"
-            >
-              <ShieldAlert className="h-3.5 w-3.5 text-amber-500" />
-              <span>Izin</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => {
-              setClipboard({ paths: Array.from(selectedPaths), operation: 'copy' });
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-[var(--surface-hover)] font-medium"
-          >
-            <Copy className="h-3.5 w-3.5" />
-            <span>Salin</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setClipboard({ paths: Array.from(selectedPaths), operation: 'cut' });
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-[var(--surface-hover)] font-medium"
-          >
-            <Scissors className="h-3.5 w-3.5" />
-            <span>Potong</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsDeleteConfirmOpen(true)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-full hover:bg-red-500/10 text-red-500 font-medium"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span>Hapus</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setSelectedPaths(new Set())}
-            className="p-1 rounded-full hover:bg-[var(--surface-hover)] text-[var(--muted-foreground)] ml-1"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
+      <footer className="fb-status"><span>{isLoading ? text('Memuat...', 'Loading...') : `${entries.filter(entry => entry.is_dir).length} folder / ${entries.filter(entry => !entry.is_dir).length} ${text('berkas', 'files')}`}{hasMore && ` / ${totalEntries} ${text('item total', 'total items')}`}</span>{quotaInfo && <span className={quotaInfo.percentage > 90 ? 'fb-quota-high' : 'fb-quota'}>{text('Kuota:', 'Quota:')} {fileSize(quotaInfo.usedBytes)} / {fileSize(quotaInfo.limitBytes)} ({quotaInfo.percentage.toFixed(0)}%)</span>}<span className="fb-status-hint">{text('Klik dua kali atau tekan Enter untuk membuka', 'Double-click or press Enter to open')}</span></footer>
+      {mobileDetails && selectedEntry && <ModalOverlay className="fb-modal fb-detail-overlay" variant="sheet" aria-label={text('Detail berkas', 'File details')} onDismiss={() => setMobileDetails(false)}><div className="dialog-panel fb-detail-sheet">{inspector}</div></ModalOverlay>}
 
       {/* 5. Upload Tray (Right Bottom Floating Widget) */}
       {uploadQueue.length > 0 && (
-        <div className="absolute right-4 bottom-4 w-80 rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--surface)] shadow-lg z-40 overflow-hidden text-xs">
+        <div className="fb-upload-tray absolute right-4 bottom-4 w-80 rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--surface)] shadow-lg z-40 overflow-hidden text-xs">
           <div className="flex items-center justify-between px-3 py-2 bg-[var(--surface-hover)] border-b border-[var(--line)]">
             <div className="flex items-center gap-1.5 font-semibold">
               <Upload className="h-3.5 w-3.5 text-blue-500" />
@@ -1528,6 +944,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
               <button
                 type="button"
                 onClick={() => setIsUploadTrayMinimized(!isUploadTrayMinimized)}
+                aria-label={isUploadTrayMinimized ? text('Perluas antrean unggah', 'Expand upload queue') : text('Minimalkan antrean unggah', 'Minimize upload queue')}
                 className="p-1 rounded hover:bg-[var(--line)]"
               >
                 <ChevronDown
@@ -1539,6 +956,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
               <button
                 type="button"
                 onClick={() => setUploadQueue([])}
+                aria-label={text('Tutup antrean unggah', 'Close upload queue')}
+                title={text('Hentikan antrean dan tutup', 'Stop the queue and close')}
                 className="p-1 rounded hover:bg-[var(--line)]"
               >
                 <X className="h-3.5 w-3.5" />
@@ -1566,7 +985,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
                         {percent}%
                       </span>
                     </div>
-                    <div className="w-full h-1.5 rounded-full bg-[var(--surface-hover)] overflow-hidden">
+                    <div role="progressbar" aria-label={item.file.name} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} className="w-full h-1.5 rounded-full bg-[var(--surface-hover)] overflow-hidden">
                       <div
                         className={`h-full transition-all duration-150 ${
                           item.status === 'completed'
@@ -1578,6 +997,7 @@ export const FileManager: React.FC<FileManagerProps> = ({
                         style={{ width: `${percent}%` }}
                       />
                     </div>
+                    <p className="text-[10px] text-[var(--muted-foreground)] mt-1">{item.status === 'completed' ? text('Selesai', 'Completed') : item.status === 'uploading' ? text('Mengunggah', 'Uploading') : item.status === 'error' ? text('Gagal', 'Failed') : text('Menunggu', 'Queued')}</p>
                     {item.errorMessage && (
                       <p className="text-[10px] text-red-500 mt-1">{item.errorMessage}</p>
                     )}
@@ -1592,7 +1012,13 @@ export const FileManager: React.FC<FileManagerProps> = ({
       {/* 6. Custom Context Menu */}
       {contextMenu && (
         <div
-          className="fixed z-50 w-48 rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--surface)] shadow-lg py-1 text-xs animate-in fade-in zoom-in-95 duration-100"
+          ref={contextMenuRef} role="group" aria-label={text('Tindakan berkas', 'File actions')} onKeyDown={event => {
+            const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+            const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            const next = event.key === 'ArrowDown' ? (index + 1) % buttons.length : event.key === 'ArrowUp' ? (index - 1 + buttons.length) % buttons.length : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : -1;
+            if (next >= 0) { event.preventDefault(); event.stopPropagation(); buttons[next]?.focus(); }
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setContextMenu(null); }
+          }} className="fb-context-menu fixed z-50 w-48 rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--surface)] shadow-lg py-1 text-xs animate-in fade-in zoom-in-95 duration-100"
           style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1814,8 +1240,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
       {/* 7. Modal: Folder Baru */}
       {isNewFolderOpen && (
-        <ModalOverlay
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+        <ModalOverlay aria-label="Buat Folder Baru"
+          className="fb-modal fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           onDismiss={() => setIsNewFolderOpen(false)}
         >
           <form
@@ -1825,8 +1251,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
             <h3 className="text-sm font-semibold text-[var(--foreground)] dialog-header">Buat Folder Baru</h3>
             <div className="dialog-body space-y-4">
               <div>
-                <label className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Folder</label>
-                <input
+                <label htmlFor={`${formId}-newFolder`} className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Folder</label>
+                <input id={`${formId}-newFolder`}
                   type="text"
                   autoFocus
                   value={newFolderName}
@@ -1857,8 +1283,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
       {/* 8. Modal: Berkas Baru */}
       {isNewFileOpen && (
-        <ModalOverlay
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+        <ModalOverlay aria-label="Buat Berkas Baru"
+          className="fb-modal fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           onDismiss={() => setIsNewFileOpen(false)}
         >
           <form
@@ -1868,8 +1294,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
             <h3 className="text-sm font-semibold text-[var(--foreground)] dialog-header">Buat Berkas Baru</h3>
             <div className="dialog-body space-y-4">
               <div>
-                <label className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Berkas</label>
-                <input
+                <label htmlFor={`${formId}-newFile`} className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Berkas</label>
+                <input id={`${formId}-newFile`}
                   type="text"
                   autoFocus
                   value={newFileName}
@@ -1900,8 +1326,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
       {/* 9. Modal: Ganti Nama */}
       {isRenameOpen && (
-        <ModalOverlay
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+        <ModalOverlay aria-label="Ganti Nama Berkas"
+          className="fb-modal fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           onDismiss={() => setIsRenameOpen(false)}
         >
           <form
@@ -1911,8 +1337,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
             <h3 className="text-sm font-semibold text-[var(--foreground)] dialog-header">Ganti Nama Berkas</h3>
             <div className="dialog-body space-y-4">
               <div>
-                <label className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Baru</label>
-                <input
+                <label htmlFor={`${formId}-rename`} className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Baru</label>
+                <input id={`${formId}-rename`}
                   type="text"
                   autoFocus
                   value={renameNewName}
@@ -1942,8 +1368,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
       {/* 10. Modal: Arsipkan / Kompresi */}
       {isCompressOpen && (
-        <ModalOverlay
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+        <ModalOverlay aria-label="Kompresi Menjadi Arsip"
+          className="fb-modal fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           onDismiss={() => setIsCompressOpen(false)}
         >
           <form
@@ -1953,8 +1379,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
             <h3 className="text-sm font-semibold text-[var(--foreground)] dialog-header">Kompresi Menjadi Arsip</h3>
             <div className="dialog-body space-y-4">
               <div>
-                <label className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Arsip</label>
-                <input
+                <label htmlFor={`${formId}-archive`} className="text-xs text-[var(--muted-foreground)] block mb-1">Nama Arsip</label>
+                <input id={`${formId}-archive`}
                   type="text"
                   value={compressName}
                   onChange={(e) => setCompressName(e.target.value)}
@@ -1962,8 +1388,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
                 />
               </div>
               <div>
-                <label className="text-xs text-[var(--muted-foreground)] block mb-1">Format</label>
-                <select
+                <label htmlFor={`${formId}-format`} className="text-xs text-[var(--muted-foreground)] block mb-1">Format</label>
+                <select id={`${formId}-format`}
                   value={compressFormat}
                   onChange={(e) => setCompressFormat(e.target.value as 'zip' | 'tar_gz')}
                   className="w-full px-3 py-2 text-xs rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--background)] text-[var(--foreground)] focus:outline-none"
@@ -1994,8 +1420,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
       {/* 11. Modal: Konfirmasi Hapus ke Sampah */}
       {isDeleteConfirmOpen && (
-        <ModalOverlay
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+        <ModalOverlay aria-label="Pindahkan ke tempat sampah"
+          className="fb-modal fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
           onDismiss={() => setIsDeleteConfirmOpen(false)}
         >
           <div className="w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--surface)] p-5 shadow-xl space-y-4 dialog-panel">
@@ -2031,8 +1457,8 @@ export const FileManager: React.FC<FileManagerProps> = ({
 
       {/* 12. Drawer: Tempat Sampah (.panel-trash) */}
       {isTrashOpen && (
-        <ModalOverlay
-          className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-xs"
+        <ModalOverlay aria-label="Tempat Sampah"
+          className="fb-modal fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-xs"
           onDismiss={() => setIsTrashOpen(false)}
           variant="sheet"
         >

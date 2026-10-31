@@ -19,6 +19,32 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_SYSTEMD_DIR: &str = "/etc/systemd/system";
 pub const DEFAULT_ENV_DIR: &str = "/etc/panel/env";
 
+pub(crate) fn validate_runtime_version(version: &str) -> Result<(), AgentError> {
+    let version = normalize_node_version(version);
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 3
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|c| c.is_ascii_digit())
+                || part.parse::<u16>().is_err()
+        })
+    {
+        return Err(AgentError::InvalidInput(
+            "Versi runtime harus major.minor.patch tanpa path atau directive".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_unit_path(value: &str) -> Result<(), AgentError> {
+    if value.chars().any(char::is_control) || value.contains('%') {
+        return Err(AgentError::InvalidInput(
+            "Path unit tidak boleh mengandung directive atau specifier".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validates site ID string (alphanumeric, hyphens, underscores).
 pub fn validate_site_id(site_id: &str) -> Result<(), AgentError> {
     if site_id.is_empty() {
@@ -147,6 +173,12 @@ pub fn generate_node_site_unit(
     validate_site_id(site_id)?;
     validate_username(username)?;
     validate_entrypoint(entrypoint)?;
+    validate_runtime_version(node_version)?;
+    validate_app_directory(username, uid, app_dir)?;
+    validate_unit_path(env_file_path)?;
+    if let Some(base) = base_runtime_dir {
+        validate_unit_path(base)?;
+    }
 
     let base_dir = base_runtime_dir.unwrap_or(DEFAULT_NODE_BASE_DIR);
     let norm_ver = normalize_node_version(node_version);
@@ -238,6 +270,7 @@ pub fn apply_node_site(
     validate_site_id(&req.site_id)?;
     validate_username(&req.username)?;
     validate_entrypoint(&req.entrypoint)?;
+    validate_runtime_version(&req.node_version)?;
     validate_app_directory(&req.username, req.uid, &req.app_dir)?;
 
     if req.port < 1024 {
@@ -613,6 +646,8 @@ pub fn run_node_site_job(
 ) -> Result<NodeSiteJobResponse, AgentError> {
     validate_site_id(&req.site_id)?;
     validate_username(&req.username)?;
+    validate_runtime_version(&req.node_version)?;
+    validate_app_directory(&req.username, req.uid, &req.app_dir)?;
 
     let base_dir = req
         .base_runtime_dir
@@ -658,6 +693,7 @@ pub fn run_node_site_job(
 
     let mut systemd_args = vec![
         "--quiet",
+        "--property=NoNewPrivileges=yes",
         &slice_arg,
         &uid_arg,
         &gid_arg,
@@ -679,7 +715,7 @@ pub fn run_node_site_job(
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output.status.code().unwrap_or(0);
+            let code = output.status.code().unwrap_or(1);
             Ok(NodeSiteJobResponse {
                 site_id: req.site_id.clone(),
                 command: format!("{} {}", binary, args_owned.join(" ")),
@@ -690,31 +726,26 @@ pub fn run_node_site_job(
                 duration_ms,
             })
         }
-        Err(e) => {
-            // If systemd-run fails because not on Linux or in mock runner, fallback directly to binary if mock
-            let direct_args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
-            if let Ok(output) = runner.run_command(binary, &direct_args) {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let code = output.status.code().unwrap_or(0);
-                return Ok(NodeSiteJobResponse {
-                    site_id: req.site_id.clone(),
-                    command: format!("{} {}", binary, args_owned.join(" ")),
-                    exit_code: code,
-                    success: code == 0,
-                    stdout,
-                    stderr,
-                    duration_ms,
-                });
-            }
-            Err(e)
-        }
+        Err(error) => Err(error),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_versions_cannot_escape_install_root_or_inject_unit_directives() {
+        for value in [
+            "../../home/p_alice/payload",
+            "22.14.0\nUser=root",
+            "22.14.0%u",
+            "22.14.0/bin/node",
+        ] {
+            assert!(validate_runtime_version(value).is_err(), "{value}");
+        }
+        assert!(validate_runtime_version("v22.14.0").is_ok());
+        assert!(validate_runtime_version("3.12.9").is_ok());
+    }
     use crate::system::{MockAction, MockSystemRunner};
 
     #[test]
@@ -973,5 +1004,13 @@ mod tests {
         assert!(res.success);
         assert_eq!(res.exit_code, 0);
         assert!(res.stdout.contains("audited 150 packages"));
+        runner.set_spawn_error("systemd-run");
+        runner.actions.lock().expect("actions").clear();
+        assert!(run_node_site_job(&runner, &req).is_err());
+        let actions = runner.actions.lock().expect("actions");
+        assert_eq!(actions.len(), 1);
+        assert!(
+            matches!(&actions[0], MockAction::Command { binary, .. } if binary == "systemd-run")
+        );
     }
 }

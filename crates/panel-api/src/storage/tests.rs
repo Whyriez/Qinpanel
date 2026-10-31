@@ -244,6 +244,94 @@ async fn usage_traverses_folders_and_continuation_pages_without_exposing_paths()
 }
 
 #[tokio::test]
+async fn empty_folder_markers_respect_owner_csrf_write_and_file_extension_rules() {
+    let ctx = Context::new().await;
+    let id = ctx.create().await;
+    ctx.verify(&id).await;
+    let policy = format!("/api/v1/storage/connections/{id}/policy");
+    assert_eq!(ctx.call("POST", &policy, Some("alice"), true,
+        json!({"expected_revision":1,"rules":{"read":true,"write":true,"delete":true,"max_file_bytes":1024,"extensions":["png"]}})).await.0, StatusCode::OK);
+    let upload = format!(
+        "/api/v1/storage/connections/{id}/upload?expected_revision=1&key=folder%20space%2B%2F&overwrite=true"
+    );
+    for (user, csrf, expected) in [
+        (None, false, StatusCode::UNAUTHORIZED),
+        (Some("admin"), true, StatusCode::FORBIDDEN),
+        (Some("bob"), true, StatusCode::NOT_FOUND),
+        (Some("alice"), false, StatusCode::FORBIDDEN),
+        (Some("alice"), true, StatusCode::OK),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(&upload)
+            .header("host", "panel.example.test")
+            .header("content-type", "application/octet-stream");
+        if let Some(user) = user {
+            request = request.header("cookie", format!("{SESSION_COOKIE_NAME}=token-{user}"));
+            if csrf {
+                request = request.header(
+                    CSRF_HEADER_NAME,
+                    generate_csrf_token(&format!("session-{user}")),
+                );
+            }
+        }
+        let response = ctx
+            .app
+            .clone()
+            .oneshot(request.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(
+        ctx.runtime
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .filter(|call| **call == "upload")
+            .count(),
+        1
+    );
+    // Nonempty objects ending in slash are still files and cannot bypass extensions.
+    assert_eq!(
+        ctx.call("POST", &upload, Some("alice"), true, json!("bytes"))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(ctx.call("POST", &policy, Some("alice"), true,
+        json!({"expected_revision":2,"rules":{"read":true,"write":false,"delete":true,"max_file_bytes":1024,"extensions":["png"]}})).await.0, StatusCode::OK);
+    let request = Request::builder()
+        .method("POST")
+        .uri(&upload)
+        .header("host", "panel.example.test")
+        .header("cookie", format!("{SESSION_COOKIE_NAME}=token-alice"))
+        .header(CSRF_HEADER_NAME, generate_csrf_token("session-alice"))
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(
+        ctx.app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("response")
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        ctx.runtime
+            .calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .filter(|call| **call == "upload")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn panel_upload_limits_use_fresh_usage_and_block_provider_mutation() {
     let ctx = Context::new().await;
     let id = ctx.create().await;

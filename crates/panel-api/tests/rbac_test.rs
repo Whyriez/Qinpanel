@@ -120,7 +120,7 @@ async fn test_unauthenticated_requests_denied() {
         )
         .await
         .expect("res");
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // Protected user & admin routes reject unauthenticated requests with 401 Unauthorized
     let endpoints = vec![

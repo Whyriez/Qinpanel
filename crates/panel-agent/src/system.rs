@@ -102,6 +102,15 @@ pub const ALLOWED_BINARIES: &[&str] = &[
 
 /// Trait abstracting underlying operating system commands and filesystem operations.
 pub trait SystemRunner: Send + Sync {
+    fn database_file_transfer(
+        &self,
+        _request: &crate::database_transfer::DatabaseFileTransfer<'_>,
+        _credentials: &panel_proto::DatabaseWebCredentials,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::SecurityViolation(
+            "Transfer SQL terisolasi tidak tersedia".into(),
+        ))
+    }
     fn operating_system(&self) -> Result<panel_core::platform::LinuxPlatform, AgentError> {
         let bytes = self.read_file(Path::new("/etc/os-release"))?;
         let text = std::str::from_utf8(&bytes)
@@ -452,7 +461,98 @@ pub(crate) fn open_owned_runtime_file(
     Ok(Some(file))
 }
 
+/// Walk each directory using owned descriptors. A tenant swapping a symlink
+/// cannot redirect root mkdir/chmod/chown into another part of the host.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn ensure_owned_directory(path: &Path, mode: u32, uid: u32, gid: u32) -> Result<(), AgentError> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, PermissionsExt},
+    };
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(AgentError::InvalidInput(
+            "Direktori terkelola harus absolut dan bukan root".into(),
+        ));
+    }
+    let mut directory = std::fs::File::open("/")?;
+    for component in path.components() {
+        let std::path::Component::Normal(name) = component else {
+            if component == std::path::Component::RootDir {
+                continue;
+            }
+            return Err(AgentError::InvalidInput(
+                "Komponen direktori tidak valid".into(),
+            ));
+        };
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| AgentError::InvalidInput("Direktori mengandung NUL".into()))?;
+        let mut created = false;
+        // SAFETY: valid owned directory descriptor and terminated single component.
+        let mut fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+            // SAFETY: mkdirat does not follow the new component.
+            if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o750) } < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error.into());
+                }
+            } else {
+                created = true;
+            }
+            // SAFETY: reject symlink substitution between mkdirat and openat.
+            fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+        }
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: fd is a newly owned descriptor.
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+        // Newly created ancestors inherit the requested identity; existing
+        // ancestors remain untouched. Leaf changes also use this exact inode.
+        if created {
+            // SAFETY: fchown operates on the open inode only.
+            if unsafe { libc::fchown(directory.as_raw_fd(), uid, gid) } < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+    }
+    let owner = directory.metadata()?.uid();
+    if owner != 0 && owner != uid {
+        return Err(AgentError::SecurityViolation(
+            "Direktori dimiliki identity lain".into(),
+        ));
+    }
+    // SAFETY: the final directory is pinned and cannot be substituted by a path race.
+    if unsafe { libc::fchown(directory.as_raw_fd(), uid, gid) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    directory.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
 impl SystemRunner for RealSystemRunner {
+    fn database_file_transfer(
+        &self,
+        request: &crate::database_transfer::DatabaseFileTransfer<'_>,
+        credentials: &panel_proto::DatabaseWebCredentials,
+    ) -> Result<(), AgentError> {
+        crate::database_transfer::execute(request, credentials)
+    }
     fn verify_origin_tls(&self, hostname: &str, certificate_pem: &str) -> Result<(), AgentError> {
         let name = tokio_rustls::rustls::pki_types::ServerName::try_from(hostname.to_owned())
             .map_err(|_| AgentError::InvalidInput("SNI origin tidak valid.".into()))?;
@@ -669,10 +769,17 @@ impl SystemRunner for RealSystemRunner {
     }
 
     fn create_dir_all(&self, path: &Path, mode: u32, uid: u32, gid: u32) -> Result<(), AgentError> {
-        std::fs::create_dir_all(path)?;
-        self.set_permissions(path, mode)?;
-        self.set_ownership(path, uid, gid)?;
-        Ok(())
+        #[cfg(unix)]
+        {
+            ensure_owned_directory(path, mode, uid, gid)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(path)?;
+            self.set_permissions(path, mode)?;
+            self.set_ownership(path, uid, gid)?;
+            Ok(())
+        }
     }
 
     fn set_permissions(&self, path: &Path, mode: u32) -> Result<(), AgentError> {
@@ -887,6 +994,13 @@ impl SystemRunner for RealSystemRunner {
 /// Record of an action executed on the mock runner for testing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MockAction {
+    DatabaseTransfer {
+        name: String,
+        path: String,
+        uid: u32,
+        import: bool,
+        database_user: String,
+    },
     Command {
         binary: String,
         args: Vec<String>,
@@ -959,6 +1073,7 @@ pub struct MockSystemRunner {
     pub responses: Arc<Mutex<std::collections::HashMap<String, MockCommandResponse>>>,
     pub files: Arc<Mutex<std::collections::HashMap<PathBuf, Vec<u8>>>>,
     pub symlinks: Arc<Mutex<std::collections::HashMap<PathBuf, PathBuf>>>,
+    pub spawn_errors: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl MockSystemRunner {
@@ -968,6 +1083,14 @@ impl MockSystemRunner {
             responses: Arc::new(Mutex::new(std::collections::HashMap::new())),
             files: Arc::new(Mutex::new(std::collections::HashMap::new())),
             symlinks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            spawn_errors: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+
+    /// Simulate failure to start an isolation helper without executing anything.
+    pub fn set_spawn_error(&self, binary: &str) {
+        if let Ok(mut errors) = self.spawn_errors.lock() {
+            errors.insert(binary.to_owned());
         }
     }
 
@@ -1008,6 +1131,23 @@ impl MockSystemRunner {
 }
 
 impl SystemRunner for MockSystemRunner {
+    fn database_file_transfer(
+        &self,
+        request: &crate::database_transfer::DatabaseFileTransfer<'_>,
+        credentials: &panel_proto::DatabaseWebCredentials,
+    ) -> Result<(), AgentError> {
+        self.actions
+            .lock()
+            .map_err(|_| AgentError::Internal("Fixture lock".into()))?
+            .push(MockAction::DatabaseTransfer {
+                name: request.name.into(),
+                path: request.path.into(),
+                uid: request.tenant_uid,
+                import: request.import,
+                database_user: credentials.username.clone(),
+            });
+        Ok(())
+    }
     fn operating_system(&self) -> Result<panel_core::platform::LinuxPlatform, AgentError> {
         // Explicit default for test fixtures only. Real hosts must have valid metadata.
         if !self.path_exists(Path::new("/etc/os-release")) {
@@ -1064,6 +1204,15 @@ impl SystemRunner for MockSystemRunner {
             });
         }
 
+        if self
+            .spawn_errors
+            .lock()
+            .is_ok_and(|errors| errors.contains(binary))
+        {
+            return Err(AgentError::Io(std::io::Error::other(
+                "Fixture spawn failure",
+            )));
+        }
         let cmd_key = format!("{binary} {}", args.join(" "));
         let (exit_code, stdout, stderr) = if let Ok(lock) = self.responses.lock() {
             if let Some((code, out, err)) = lock.get(&cmd_key).or_else(|| lock.get(binary)) {
@@ -1435,6 +1584,34 @@ mod download_tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&original).unwrap(), b"preserve");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_directories_never_chmod_or_chown_a_symlink_target() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let before = outside.path().metadata().unwrap();
+        symlink(outside.path(), root.path().join("alias")).unwrap();
+        let uid = root.path().metadata().unwrap().uid();
+        let gid = root.path().metadata().unwrap().gid();
+        for path in [root.path().join("alias"), root.path().join("alias/nested")] {
+            assert!(
+                RealSystemRunner
+                    .create_dir_all(&path, 0o777, uid, gid)
+                    .is_err()
+            );
+        }
+        let after = outside.path().metadata().unwrap();
+        assert_eq!(before.permissions().mode(), after.permissions().mode());
+        assert_eq!(before.uid(), after.uid());
+        assert!(!outside.path().join("nested").exists());
+        let leaf = root.path().join("safe/leaf");
+        RealSystemRunner
+            .create_dir_all(&leaf, 0o700, uid, gid)
+            .unwrap();
+        assert_eq!(leaf.metadata().unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     // This is a child test fixture, never the panel-agent daemon or a system command.

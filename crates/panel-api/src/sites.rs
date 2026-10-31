@@ -440,12 +440,7 @@ fn render_python_vhost_for_site(
     renderer: &NginxTemplateRenderer,
     args: PythonVhostRenderArgs<'_>,
 ) -> Result<String, (StatusCode, String)> {
-    let socket_path = args
-        .settings
-        .get("socket_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("/run/panel/python/site_{}/app.sock", args.site.id));
+    let socket_path = format!("/run/panel/python/site_{}/app.sock", args.site.id);
 
     let static_url = args
         .settings
@@ -467,6 +462,13 @@ fn render_python_vhost_for_site(
         .get("media_dir")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    for directory in [static_dir.as_deref(), media_dir.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        require_nginx_tenant_directory(directory, args.linux_uname)?;
+    }
 
     let python_ctx = PythonVhostContext {
         site_id: format!("site_{}", args.site.id),
@@ -522,12 +524,29 @@ fn render_python_vhost_for_site(
     })
 }
 
+/// Shared Nginx workers must never read another tenant directory.
+fn require_nginx_tenant_directory(path: &str, username: &str) -> Result<(), (StatusCode, String)> {
+    if !path.starts_with(&format!("/home/{username}/"))
+        || path.split('/').any(|part| matches!(part, "." | ".."))
+        || path
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\\' | '$' | '%'))
+    {
+        return Err((StatusCode::FORBIDDEN, "Direktori Nginx harus berada di home tenant pemilik tanpa traversal atau ekspansi variabel".into()));
+    }
+    Ok(())
+}
+
 /// Render only: certificate switches must not restart application runtimes.
-pub(crate) fn render_site_vhost(
+pub(crate) async fn render_site_vhost(
+    pool: &panel_db::pool::DbPool,
     site: &Site,
     user: &User,
     domains: &[Domain],
 ) -> Result<String, (StatusCode, String)> {
+    for domain in domains {
+        crate::domain_policy::require_tenant_domain(pool, &domain.name, None).await?;
+    }
     let primary_domain = domains
         .iter()
         .find(|d| d.is_primary)
@@ -563,6 +582,7 @@ pub(crate) fn render_site_vhost(
     let (resolved_linux_name, _resolved_linux_uid) =
         crate::tenant_context::execution_identity(user)?;
     let linux_uname = resolved_linux_name.as_str();
+    require_nginx_tenant_directory(&site.docroot, linux_uname)?;
 
     let renderer = NginxTemplateRenderer::new();
     let is_php = site.kind == "php" || site.runtime.as_deref() == Some("php");
@@ -657,16 +677,17 @@ pub(crate) fn render_site_vhost(
             )
         })?
     } else if is_nodejs {
+        let port = settings["port"]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, "Port runtime tidak valid".into()))?;
+        crate::node_site::validate_runtime_port(pool, Some(site.id), port).await?;
         let port = settings
             .get("port")
             .and_then(|v| v.as_u64())
             .map(|p| p as u16)
             .unwrap_or(20000);
-        let upstream_url = settings
-            .get("upstream_url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
+        let upstream_url = format!("http://127.0.0.1:{port}");
 
         let nodejs_ctx = NodejsVhostContext {
             site_id: format!("site_{}", site.id),
@@ -734,6 +755,8 @@ pub(crate) fn render_site_vhost(
             .and_then(|v| v.as_str())
             .unwrap_or("http://127.0.0.1:8080")
             .to_string();
+        let admitted = crate::proxy_policy::admit(pool, site.user_id, &upstream_url).await?;
+        let upstream_url = admitted.url;
         let preserve_host = settings
             .get("preserve_host")
             .and_then(|v| v.as_bool())
@@ -789,7 +812,8 @@ pub(crate) fn render_site_vhost(
                 .unwrap_or(false),
             upstream_url,
             preserve_host,
-            custom_host_header: None,
+            custom_host_header: admitted.authority,
+            proxy_ssl_name: admitted.tls_name,
             websocket_support,
             upload_max_size: None,
             proxy_connect_timeout,
@@ -851,7 +875,7 @@ pub async fn recompile_and_apply_site_vhost(
     user: &User,
     domains: &[Domain],
 ) -> Result<(), (StatusCode, String)> {
-    let rendered = render_site_vhost(site, user, domains)?;
+    let rendered = render_site_vhost(&state.pool, site, user, domains).await?;
     let primary_domain = domains
         .iter()
         .find(|d| d.is_primary)
@@ -1356,6 +1380,7 @@ fn site_agent_error_details(
 pub async fn create_static_site_handler(
     State(state): State<AppState>,
     auth_user: AuthenticatedUser,
+    context: Option<axum::Extension<crate::public_url::PublicRequest>>,
     Json(payload): Json<CreateStaticSiteRequest>,
 ) -> impl IntoResponse {
     let site_repo = SqliteSiteRepository::new(state.pool.clone());
@@ -1381,6 +1406,15 @@ pub async fn create_static_site_handler(
     };
     let ascii_domain = parsed_domain.as_ascii().to_string();
     let unicode_domain = parsed_domain.as_unicode().to_string();
+    if let Err((status, message)) = crate::domain_policy::require_tenant_domain(
+        &state.pool,
+        &ascii_domain,
+        context.as_ref().map(|value| &value.0),
+    )
+    .await
+    {
+        return (status, Json(serde_json::json!({"error":message}))).into_response();
+    }
 
     // 3. Check domain global availability
     match domain_repo.is_domain_available(&ascii_domain).await {
@@ -1483,6 +1517,11 @@ pub async fn create_static_site_handler(
                 }
             },
         };
+        if let Err((status, message)) =
+            crate::node_site::validate_runtime_port(&state.pool, None, port).await
+        {
+            return (status, Json(serde_json::json!({"error":message}))).into_response();
+        }
         let node_ver = payload
             .node_version
             .clone()
@@ -1614,6 +1653,11 @@ pub async fn create_static_site_handler(
             return (status, Json(serde_json::json!({ "error": err_str }))).into_response();
         }
 
+        if let Err((status, message)) =
+            crate::proxy_policy::admit(&state.pool, target_user.id, &upstream).await
+        {
+            return (status, Json(serde_json::json!({"error":message}))).into_response();
+        }
         let preserve_host = payload.preserve_host.unwrap_or(true);
         let websocket_support = payload.websocket_support.unwrap_or(true);
 
@@ -2679,7 +2723,7 @@ async fn control_site_vhost(
             .find_by_site_id(site.id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        render_site_vhost(site, &user, &domains)?
+        render_site_vhost(&state.pool, site, &user, &domains).await?
     } else {
         String::new()
     };
@@ -2912,6 +2956,7 @@ pub async fn list_site_domains_handler(
 pub async fn add_site_domain_handler(
     State(state): State<AppState>,
     auth_user: AuthenticatedUser,
+    context: Option<axum::Extension<crate::public_url::PublicRequest>>,
     Path(site_id): Path<i64>,
     Json(payload): Json<AddSiteDomainRequest>,
 ) -> impl IntoResponse {
@@ -2950,6 +2995,15 @@ pub async fn add_site_domain_handler(
     };
     let ascii_domain = parsed.as_ascii().to_string();
     let unicode_domain = parsed.as_unicode().to_string();
+    if let Err((status, message)) = crate::domain_policy::require_tenant_domain(
+        &state.pool,
+        &ascii_domain,
+        context.as_ref().map(|value| &value.0),
+    )
+    .await
+    {
+        return (status, Json(serde_json::json!({"error":message}))).into_response();
+    }
 
     // Check domain global availability
     match domain_repo.is_domain_available(&ascii_domain).await {

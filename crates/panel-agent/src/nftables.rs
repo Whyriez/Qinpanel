@@ -67,9 +67,31 @@ impl NftablesManager {
         out.push_str("# QonPanel Loopback Per-UID Isolation Guard (P10-T4)\n");
         out.push_str("# Prevents tenant B from connecting to tenant A's local loopback port.\n\n");
 
+        // Both commands are in the same nft transaction as the replacement.
+        // Reapplying must remove stale UID grants instead of appending rules.
+        out.push_str(&format!(
+            "add table inet {}\nflush table inet {}\n",
+            self.table_name, self.table_name
+        ));
         out.push_str(&format!("table inet {} {{\n", self.table_name));
+        let mut sorted_bindings = bindings.to_vec();
+        sorted_bindings.sort_by_key(|b| b.port);
+        out.push_str("    chain tenant_source {\n");
+        for b in &sorted_bindings {
+            out.push_str(&format!(
+                "        tcp sport {} meta skuid {} return;\n",
+                b.port, b.tenant_uid
+            ));
+        }
+        out.push_str("        drop;\n    }\n");
         out.push_str("    chain output {\n");
         out.push_str("        type filter hook output priority 0; policy accept;\n\n");
+        // Check the responding socket before the privileged Nginx/root client
+        // exceptions. Returning from the subchain still checks destination UID.
+        out.push_str(&format!(
+            "        oif \"lo\" tcp sport {}-{} jump tenant_source;\n",
+            TENANT_PORT_RANGE_START, TENANT_PORT_RANGE_END
+        ));
         out.push_str("        # Allow root (uid 0) and Nginx reverse proxy (www-data: uid 33) to access all tenant apps\n");
         out.push_str(&format!(
             "        oif \"lo\" tcp dport {}-{} meta skuid {{ {}, {} }} accept;\n\n",
@@ -77,9 +99,6 @@ impl NftablesManager {
         ));
 
         out.push_str("        # Specific tenant application ports: allow only site owner UID\n");
-        let mut sorted_bindings = bindings.to_vec();
-        sorted_bindings.sort_by_key(|b| b.port);
-
         for b in &sorted_bindings {
             out.push_str(&format!(
                 "        # site_{} port {}\n        oif \"lo\" tcp dport {} meta skuid {} accept;\n",
@@ -140,6 +159,18 @@ impl NftablesManager {
         &self,
         bindings: &[TenantPortBinding],
     ) -> Result<NftablesStatus, AgentError> {
+        let mut ports = std::collections::HashSet::new();
+        for binding in bindings {
+            panel_core::tenant::TenantUid::parse(binding.tenant_uid)
+                .map_err(|error| AgentError::InvalidInput(error.to_string()))?;
+            if !(TENANT_PORT_RANGE_START..=TENANT_PORT_RANGE_END).contains(&binding.port)
+                || !ports.insert(binding.port)
+            {
+                return Err(AgentError::InvalidInput(
+                    "Pemetaan port tenant harus unik dan dalam rentang terisolasi".into(),
+                ));
+            }
+        }
         let rules = self.render_rules(bindings);
         self.validate_rules(&rules)?;
 
@@ -168,7 +199,7 @@ impl NftablesManager {
                 Ok(NftablesStatus {
                     enabled: true,
                     table_name: self.table_name.clone(),
-                    active_rules_count: bindings.len() + 2, // root+nginx allow, per-tenant rules, drop rule
+                    active_rules_count: 2 * bindings.len() + 4,
                     protected_ports_count: bindings.len(),
                     last_synced_at: epoch,
                 })
@@ -196,7 +227,7 @@ impl NftablesManager {
         NftablesStatus {
             enabled: exists,
             table_name: self.table_name.clone(),
-            active_rules_count: if exists { bindings_count + 2 } else { 0 },
+            active_rules_count: if exists { 2 * bindings_count + 4 } else { 0 },
             protected_ports_count: bindings_count,
             last_synced_at: epoch,
         }
@@ -269,12 +300,12 @@ mod tests {
         let bindings = vec![
             TenantPortBinding {
                 site_id: 1,
-                tenant_uid: 1001,
+                tenant_uid: 10001,
                 port: 20001,
             },
             TenantPortBinding {
                 site_id: 2,
-                tenant_uid: 1002,
+                tenant_uid: 10002,
                 port: 20002,
             },
         ];
@@ -284,8 +315,20 @@ mod tests {
         assert!(rules.contains("table inet panel_loopback_guard"));
         assert!(rules.contains("chain output"));
         assert!(rules.contains("meta skuid { 0, 33 } accept"));
-        assert!(rules.contains("oif \"lo\" tcp dport 20001 meta skuid 1001 accept"));
-        assert!(rules.contains("oif \"lo\" tcp dport 20002 meta skuid 1002 accept"));
+        assert!(rules.contains("oif \"lo\" tcp dport 20001 meta skuid 10001 accept"));
+        assert!(rules.contains("oif \"lo\" tcp dport 20002 meta skuid 10002 accept"));
+        assert!(rules.contains(
+            "add table inet panel_loopback_guard\nflush table inet panel_loopback_guard"
+        ));
+        assert!(rules.contains("tcp sport 20001 meta skuid 10001 return;"));
+        assert!(rules.contains("tcp sport 20002 meta skuid 10002 return;"));
+        assert!(rules.contains("chain tenant_source {"));
+        assert!(rules.contains("        drop;\n    }"));
+        assert!(
+            rules.find("jump tenant_source").unwrap()
+                < rules.find("meta skuid { 0, 33 } accept").unwrap()
+        );
+        assert!(!rules.contains("meta skuid 10001 accept;\n    }"));
         assert!(rules.contains("reject with tcp reset"));
     }
 
@@ -299,7 +342,7 @@ mod tests {
 
         let bindings = vec![TenantPortBinding {
             site_id: 10,
-            tenant_uid: 1005,
+            tenant_uid: 10005,
             port: 20050,
         }];
 
@@ -308,6 +351,42 @@ mod tests {
         let st = status.unwrap();
         assert!(st.enabled);
         assert_eq!(st.protected_ports_count, 1);
-        assert_eq!(st.active_rules_count, 3);
+        assert_eq!(st.active_rules_count, 6);
+    }
+
+    #[test]
+    fn contradictory_or_privileged_bindings_fail_before_writing_rules() {
+        let runner = Arc::new(MockSystemRunner::new());
+        let manager = NftablesManager::new(runner.clone());
+        let valid = TenantPortBinding {
+            site_id: 1,
+            tenant_uid: 10001,
+            port: 20050,
+        };
+        for invalid in [
+            TenantPortBinding {
+                tenant_uid: 0,
+                ..valid.clone()
+            },
+            TenantPortBinding {
+                port: 7700,
+                ..valid.clone()
+            },
+        ] {
+            assert!(manager.sync_bindings(&[invalid]).is_err());
+        }
+        assert!(
+            manager
+                .sync_bindings(&[
+                    valid.clone(),
+                    TenantPortBinding {
+                        site_id: 2,
+                        tenant_uid: 10002,
+                        ..valid
+                    }
+                ])
+                .is_err()
+        );
+        assert!(runner.recorded_actions().is_empty());
     }
 }

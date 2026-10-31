@@ -722,6 +722,91 @@ async fn list_pages_and_counts_are_authorized_and_single_resource_reload_is_scop
 }
 
 #[tokio::test]
+async fn project_filter_scopes_counts_pages_and_options_without_relaxing_ownership() {
+    let f = fixture().await;
+    let second_project = SqliteSiteRepository::new(f.pool.clone())
+        .create(&CreateSite {
+            user_id: f.users[1],
+            kind: "static".into(),
+            docroot: "/fixture/unused".into(),
+            runtime: None,
+            version: None,
+            status: None,
+            settings_json: None,
+        })
+        .await
+        .unwrap();
+    create(&f, config(second_project.id)).await;
+    create(&f, config(f.sites[1])).await;
+    create(&f, config(f.sites[0])).await;
+    let mut alternate = config(f.sites[0]);
+    alternate["primary"] = json!(false);
+    alternate["port"] = json!(9443);
+    create(&f, alternate).await;
+    for actor in [0, 1] {
+        let mut ids = vec![];
+        for page in [1, 2] {
+            let (status, body) = call(
+                &f,
+                Some(actor),
+                false,
+                "GET",
+                &format!(
+                    "/api/v1/connectivity?site_id={}&page={page}&per_page=1&service=website",
+                    f.sites[0]
+                ),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["can_manage"], actor == 0);
+            assert_eq!(body["total"], 2);
+            assert_eq!(body["total_pages"], 2);
+            assert_eq!(body["service_counts"]["website"], 2);
+            assert_eq!(body["projects"].as_array().unwrap().len(), 1);
+            assert_eq!(body["projects"][0]["id"], f.sites[0]);
+            assert_eq!(body["endpoints"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                body["endpoints"][0]["endpoint"]["scope"]["site_id"],
+                f.sites[0]
+            );
+            ids.push(body["endpoints"][0]["endpoint"]["id"].clone());
+        }
+        assert_ne!(ids[0], ids[1]);
+    }
+    for site_id in [f.sites[1], 999999, 0, -1] {
+        let (status, _) = call(
+            &f,
+            Some(1),
+            false,
+            "GET",
+            &format!("/api/v1/connectivity?site_id={site_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    sqlx::query("UPDATE sites SET status='suspended' WHERE id=?")
+        .bind(f.sites[0])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &f,
+            Some(1),
+            false,
+            "GET",
+            &format!("/api/v1/connectivity?site_id={}", f.sites[0]),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn diagnosis_requires_admin_csrf_registered_current_enabled_endpoint_and_no_target_input() {
     let f = fixture().await;
     let mut cfg = config(f.sites[0]);

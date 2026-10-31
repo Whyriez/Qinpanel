@@ -64,6 +64,22 @@ pub fn validate_command(command: &str) -> Result<(), AgentError> {
             "Command cron tidak boleh kosong".into(),
         ));
     }
+    if command.len() > 8192
+        || command.contains(';')
+        || command.chars().any(|c| c.is_control() && c != '\t')
+    {
+        return Err(AgentError::InvalidInput(
+            "Command harus satu executable tanpa pemisah command systemd atau karakter kontrol"
+                .into(),
+        ));
+    }
+    // systemd's '+', '!' and related ExecStart prefixes change credential and
+    // sandbox handling. Tenant input is a command, never a unit directive.
+    if !trimmed.starts_with(|c: char| c == '/' || c == '_' || c.is_ascii_alphanumeric()) {
+        return Err(AgentError::InvalidInput(
+            "Command cron harus diawali executable tanpa prefix khusus systemd".into(),
+        ));
+    }
     if trimmed.contains('\n') || trimmed.contains('\r') {
         return Err(AgentError::InvalidInput(
             "Command cron tidak boleh mengandung karakter baris baru (newline)".into(),
@@ -98,6 +114,24 @@ pub fn generate_cron_service_unit(
     validate_site_id(config.site_id)?;
     validate_username(config.username)?;
     validate_command(config.command)?;
+    panel_core::tenant::TenantUid::parse(config.uid)
+        .map_err(|error| AgentError::InvalidInput(error.to_string()))?;
+    if panel_core::tenant::is_reserved_username(config.username)
+        || !(config.work_dir == format!("/home/{}", config.username)
+            || config
+                .work_dir
+                .starts_with(&format!("/home/{}/", config.username)))
+        || config.work_dir.contains(['\n', '\r', '\0', '%', '\\'])
+        || config
+            .work_dir
+            .split('/')
+            .any(|part| matches!(part, "." | ".."))
+        || config.env_file_path != format!("{}/site-{}.env", DEFAULT_ENV_DIR, config.site_id)
+    {
+        return Err(AgentError::InvalidInput(
+            "Konteks direktori atau environment cron tidak valid".into(),
+        ));
+    }
 
     let clean_name = config.name.replace(['\n', '\r'], " ");
     let site_id = config.site_id;
@@ -149,6 +183,14 @@ pub fn generate_cron_timer_unit(
     systemd_calendar: &str,
 ) -> Result<String, AgentError> {
     validate_site_id(site_id)?;
+    if systemd_calendar.len() > 512
+        || systemd_calendar.chars().any(char::is_control)
+        || systemd_calendar.contains('%')
+    {
+        return Err(AgentError::InvalidInput(
+            "Jadwal cron tidak boleh mengandung directive systemd".into(),
+        ));
+    }
     let clean_name = name.replace(['\n', '\r'], " ");
     let service_name = format!("site-{site_id}-cron-{job_id}.service");
 
@@ -354,6 +396,24 @@ pub fn read_cron_job_logs(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn tenant_commands_cannot_override_systemd_credentials() {
+        for command in [
+            "+/usr/bin/fixture",
+            "!/usr/bin/fixture",
+            "!!/usr/bin/fixture",
+            "-+/usr/bin/fixture",
+            "@/usr/bin/fixture",
+            ":+/usr/bin/fixture",
+            "  +/usr/bin/fixture",
+            "/usr/bin/true ; +/usr/bin/fixture",
+            "/usr/bin/true\n",
+        ] {
+            assert!(validate_command(command).is_err(), "{command}");
+        }
+        assert!(validate_command("/usr/bin/php artisan schedule:run").is_ok());
+        assert!(generate_cron_timer_unit("1", 1, "fixture", "daily\nUnit=other.service").is_err());
+    }
     use crate::system::{MockAction, MockSystemRunner};
 
     #[test]

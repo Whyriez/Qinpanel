@@ -11,6 +11,7 @@ import {
 import { JobItem, JobProgressEvent } from '../../types/api';
 import { fetchJobs, cancelJob, subscribeJobEvents } from '../../api/client';
 import { StatusPill, StatusVariant } from '../ui/StatusPill';
+import { useAuth } from '../../context/AuthContext';
 import { canCancelJob } from '../../lib/jobProgress';
 
 export interface JobTrayProps {
@@ -19,6 +20,8 @@ export interface JobTrayProps {
 
 export const JobTray: React.FC<JobTrayProps> = ({ onNavigateToJobs }) => {
   const { t } = useTranslation();
+  const { user } = useAuth();
+  const tenant = user?.role !== 'admin';
   const [isOpen, setIsOpen] = useState(false);
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -114,7 +117,7 @@ export const JobTray: React.FC<JobTrayProps> = ({ onNavigateToJobs }) => {
             <div className="flex items-center gap-2">
               <ListTodo className="w-4 h-4 text-[var(--primary)]" />
               <span className="font-semibold text-xs text-[var(--ink)]">
-                {t('jobs.trayTitle')}
+                {t(tenant ? 'activity.trayTitle' : 'jobs.trayTitle')}
               </span>
               {activeCount > 0 && (
                 <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-[var(--primary)] text-white">
@@ -135,7 +138,7 @@ export const JobTray: React.FC<JobTrayProps> = ({ onNavigateToJobs }) => {
           <div className="max-h-72 overflow-y-auto divide-y divide-[var(--line)] p-1">
             {jobs.length === 0 ? (
               <div className="py-8 text-center text-xs text-[var(--ink-muted)]">
-                {loading ? t('common.loading') : t('jobs.noJobs')}
+                {loading ? t('common.loading') : t(tenant ? 'activity.noJobs' : 'jobs.noJobs')}
               </div>
             ) : (
               jobs.map((job) => (
@@ -199,7 +202,7 @@ export const JobTray: React.FC<JobTrayProps> = ({ onNavigateToJobs }) => {
                 }}
                 className="w-full flex items-center justify-center gap-1.5 py-1 text-xs font-medium text-[var(--primary)] hover:underline"
               >
-                <span>{t('jobs.viewAll')}</span>
+                <span>{t(tenant ? 'activity.viewAll' : 'jobs.viewAll')}</span>
                 <ExternalLink className="w-3 h-3" />
               </button>
             </div>
@@ -211,7 +214,7 @@ export const JobTray: React.FC<JobTrayProps> = ({ onNavigateToJobs }) => {
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center gap-2.5 px-3.5 py-2 bg-[var(--surface)] border border-[var(--line)] rounded-[var(--radius-full)] shadow-[var(--shadow-floating)] text-xs text-[var(--ink-muted)] hover:border-[var(--primary)]/40 hover:text-[var(--ink)] transition-all"
-        title="Klik untuk membuka antrean tugas latar belakang"
+        title={t(tenant ? 'activity.trayHint' : 'jobs.trayHint')}
       >
         <span
           className={`w-2 h-2 rounded-full ${
@@ -221,7 +224,7 @@ export const JobTray: React.FC<JobTrayProps> = ({ onNavigateToJobs }) => {
           }`}
         />
         <span className="font-semibold text-[var(--ink)]">
-          Tugas ({activeCount} aktif)
+          {t('jobs.trayActiveCount', { label: t(tenant ? 'nav.activity' : 'nav.jobs'), count: activeCount })}
         </span>
         {isOpen ? (
           <ChevronDown className="w-3.5 h-3.5 text-[var(--ink-muted)]" />

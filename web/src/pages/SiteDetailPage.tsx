@@ -51,6 +51,7 @@ import { SiteDatabaseTab } from '../components/sites/SiteDatabaseTab';
 import { SiteBackupsTab } from '../components/sites/SiteBackupsTab';
 import { SiteOverviewTab } from '../components/sites/SiteOverviewTab';
 import { SiteAnalyticsTab } from '../components/sites/SiteAnalyticsTab';
+import { ProjectConnectionInfo } from '../components/sites/ProjectConnectionInfo';
 import { PulseStrip } from '../components/ui/PulseStrip';
 import { SshConnectModal } from '../components/ssh/SshConnectModal';
 import { useAuth } from '../context/AuthContext';
@@ -91,7 +92,7 @@ export interface SiteDetailPageProps {
   onBack: () => void;
 }
 
-type TabType = 'overview' | 'analytics' | 'domains' | 'files' | 'environment' | 'storage' | 'database' | 'ssl' | 'rules' | 'deploy' | 'backups' | 'logs' | 'php' | 'node' | 'python' | 'proxy' | 'cron' | 'settings';
+type TabType = 'overview' | 'connections' | 'analytics' | 'domains' | 'files' | 'environment' | 'storage' | 'database' | 'ssl' | 'rules' | 'deploy' | 'backups' | 'logs' | 'php' | 'node' | 'python' | 'proxy' | 'cron' | 'settings';
 
 export const SiteDetailPage: React.FC<SiteDetailPageProps> = ({ siteId, onBack }) => {
   const { t } = useTranslation();
@@ -747,6 +748,11 @@ export const SiteDetailPage: React.FC<SiteDetailPageProps> = ({ siteId, onBack }
           {t('sites.tabs.overview')}
         </RouteLink>
 
+        <RouteLink href={sitePath(site, 'connections')} aria-current={activeTab === 'connections' ? 'page' : undefined}
+          className={`px-4 py-2.5 border-b-2 transition-colors flex items-center gap-2 shrink-0 ${activeTab === 'connections' ? 'border-[var(--primary)] text-[var(--primary)] font-semibold' : 'border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>
+          <Network className="w-4 h-4" aria-hidden="true" />{t('sites.tabs.connections')}
+        </RouteLink>
+
         <RouteLink href={sitePath(site, 'storage')}
           className={`px-4 py-2.5 border-b-2 transition-colors flex items-center gap-2 shrink-0 ${activeTab === 'storage' ? 'border-[var(--primary)] text-[var(--primary)] font-semibold' : 'border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>
           <Archive className="w-4 h-4" /> Storage S3
@@ -966,6 +972,7 @@ export const SiteDetailPage: React.FC<SiteDetailPageProps> = ({ siteId, onBack }
       {/* ===================================================================== */}
       {/* TAB 2: DOMAINS & ALIASES                                              */}
       {/* ===================================================================== */}
+      {activeTab === 'connections' && <ProjectConnectionInfo key={`${user?.id}:${site.id}`} site={site} onOpenSsh={() => setIsSshModalOpen(true)} />}
       {activeTab === 'storage' && <StoragePage scopeSiteId={site.id} scopeOwnerId={site.user_id} />}
 
       {activeTab === 'domains' && (

@@ -51,12 +51,17 @@ describe('CommandPalette Component', () => {
     expect(html).toContain('Analitik');
     expect(html).toContain('Lalu lintas dan performa situs');
     expect(html).toContain('Halaman ini');
+    expect(html).toContain('Aktivitas');
+    expect(html).toContain('Progres dan riwayat backup');
+    expect(html).not.toContain('Konektivitas');
     for (const description of ['Akun dan ruang hosting', 'Batas sumber daya dan akses', 'Versi PHP dan Node.js', 'Catatan aktivitas panel', 'Konfigurasi panel dan keamanan']) expect(html).not.toContain(description);
   });
 
   it('provides the full administration group for administrators', () => {
     auth.role = 'admin';
     const html = renderToString(<CommandPalette isOpen onNavigate={vi.fn()} theme="dark" onThemeChange={vi.fn()} />);
+    expect(html).toContain('Konektivitas');
+    expect(html).toContain('Tugas');
     expect(html).toContain('Administrasi');
     for (const description of ['Akun dan ruang hosting', 'Batas sumber daya dan akses', 'Versi PHP dan Node.js', 'Catatan aktivitas panel', 'Konfigurasi panel dan keamanan']) expect(html).toContain(description);
     expect(html).toContain('command-active');

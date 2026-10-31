@@ -224,9 +224,22 @@ impl SqliteConnectivityRepository {
         limit: u32,
         offset: u64,
     ) -> Result<Vec<ServiceEndpoint>, DbError> {
+        self.list_scoped_page(actor_id, service, None, limit, offset)
+            .await
+    }
+
+    pub async fn list_scoped_page(
+        &self,
+        actor_id: i64,
+        service: Option<EndpointService>,
+        site_id: Option<i64>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<ServiceEndpoint>, DbError> {
         let rows = sqlx::query_as::<_, EndpointRow>(&format!(
-            "SELECT {COLUMNS} FROM service_endpoints e WHERE {VISIBLE} AND (? IS NULL OR e.service=?) ORDER BY e.service,e.id LIMIT ? OFFSET ?"
+            "SELECT {COLUMNS} FROM service_endpoints e WHERE {VISIBLE} AND (? IS NULL OR e.service=?) AND (? IS NULL OR (e.scope_kind='project' AND e.site_id=?)) ORDER BY e.service,e.id LIMIT ? OFFSET ?"
         )).bind(actor_id).bind(service.map(EndpointService::as_str)).bind(service.map(EndpointService::as_str))
+            .bind(site_id).bind(site_id)
             .bind(i64::from(limit)).bind(i64::try_from(offset).map_err(|_| validation("Halaman tidak valid."))?).fetch_all(&self.pool).await?;
         rows.into_iter().map(EndpointRow::into_endpoint).collect()
     }
@@ -235,10 +248,20 @@ impl SqliteConnectivityRepository {
         &self,
         actor_id: i64,
     ) -> Result<std::collections::BTreeMap<String, i64>, DbError> {
+        self.scoped_service_counts(actor_id, None).await
+    }
+
+    pub async fn scoped_service_counts(
+        &self,
+        actor_id: i64,
+        site_id: Option<i64>,
+    ) -> Result<std::collections::BTreeMap<String, i64>, DbError> {
         let rows: Vec<(String, i64)> = sqlx::query_as(&format!(
-            "SELECT e.service,COUNT(*) FROM service_endpoints e WHERE {VISIBLE} GROUP BY e.service"
+            "SELECT e.service,COUNT(*) FROM service_endpoints e WHERE {VISIBLE} AND (? IS NULL OR (e.scope_kind='project' AND e.site_id=?)) GROUP BY e.service"
         ))
         .bind(actor_id)
+        .bind(site_id)
+        .bind(site_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().collect())

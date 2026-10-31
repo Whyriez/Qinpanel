@@ -90,6 +90,16 @@ pub fn validate_username(username: &str) -> Result<(), AgentError> {
 
 /// Validates entrypoint configuration.
 pub fn validate_entrypoint(entrypoint: &PythonSiteEntrypoint) -> Result<(), AgentError> {
+    let value = match entrypoint {
+        PythonSiteEntrypoint::Wsgi(value)
+        | PythonSiteEntrypoint::Asgi(value)
+        | PythonSiteEntrypoint::CustomCommand(value) => value,
+    };
+    if value.len() > 2048 || value.chars().any(char::is_control) || value.contains('%') {
+        return Err(AgentError::InvalidInput(
+            "Entrypoint tidak boleh mengandung directive atau specifier systemd".into(),
+        ));
+    }
     match entrypoint {
         PythonSiteEntrypoint::Wsgi(ep) | PythonSiteEntrypoint::Asgi(ep) => {
             if ep.trim().is_empty() {
@@ -114,6 +124,7 @@ pub fn validate_entrypoint(entrypoint: &PythonSiteEntrypoint) -> Result<(), Agen
             }
         }
         PythonSiteEntrypoint::CustomCommand(cmd) => {
+            crate::cron::validate_command(cmd)?;
             if cmd.trim().is_empty() {
                 return Err(AgentError::InvalidInput(
                     "Custom command tidak boleh kosong".into(),
@@ -194,6 +205,13 @@ pub fn generate_python_site_unit(
     validate_site_id(site_id)?;
     validate_username(username)?;
     validate_entrypoint(entrypoint)?;
+    crate::node_site::validate_runtime_version(python_version)?;
+    crate::node_site::validate_app_directory(username, uid, app_dir)?;
+    crate::node_site::validate_app_directory(username, uid, venv_dir)?;
+    crate::node_site::validate_unit_path(env_file_path)?;
+    if let Some(base) = base_runtime_dir {
+        crate::node_site::validate_unit_path(base)?;
+    }
     validate_site_socket(site_id, socket_path)?;
 
     let base_dir = base_runtime_dir.unwrap_or(DEFAULT_PYTHON_BASE_DIR);
@@ -391,6 +409,7 @@ pub fn apply_python_site(
     validate_site_id(&req.site_id)?;
     validate_username(&req.username)?;
     validate_entrypoint(&req.entrypoint)?;
+    crate::node_site::validate_runtime_version(&req.python_version)?;
     validate_site_socket(&req.site_id, &req.socket_path)?;
     crate::node_site::validate_app_directory(&req.username, req.uid, &req.app_dir)?;
     crate::node_site::validate_app_directory(&req.username, req.uid, &req.venv_dir)?;
@@ -734,6 +753,9 @@ pub fn run_python_site_job(
 ) -> Result<PythonSiteJobResponse, AgentError> {
     validate_site_id(&req.site_id)?;
     validate_username(&req.username)?;
+    crate::node_site::validate_runtime_version(&req.python_version)?;
+    crate::node_site::validate_app_directory(&req.username, req.uid, &req.app_dir)?;
+    crate::node_site::validate_app_directory(&req.username, req.uid, &req.venv_dir)?;
 
     let base_dir = req
         .base_runtime_dir
@@ -797,6 +819,7 @@ pub fn run_python_site_job(
 
     let mut systemd_args = vec![
         "--quiet",
+        "--property=NoNewPrivileges=yes",
         &slice_arg,
         &uid_arg,
         &gid_arg,
@@ -975,6 +998,25 @@ pub fn remove_python_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn python_entrypoint_rejects_systemd_privilege_prefixes_and_newline_directives() {
+        for command in [
+            "+/usr/bin/fixture",
+            "!/usr/bin/fixture",
+            "-+/usr/bin/fixture",
+            "/usr/bin/fixture\nUser=root",
+            "/usr/bin/%u",
+        ] {
+            assert!(
+                validate_entrypoint(&PythonSiteEntrypoint::CustomCommand(command.into())).is_err(),
+                "{command}"
+            );
+        }
+        assert!(
+            validate_entrypoint(&PythonSiteEntrypoint::Wsgi("main:app\nUser=root".into())).is_err()
+        );
+        assert!(validate_entrypoint(&PythonSiteEntrypoint::Wsgi("main:app".into())).is_ok());
+    }
     use crate::system::{MockAction, MockSystemRunner};
 
     #[test]

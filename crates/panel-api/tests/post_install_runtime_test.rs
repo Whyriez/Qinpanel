@@ -321,6 +321,7 @@ async fn runtime_provisioning_errors_keep_json_details_and_cleanup_instead_of_50
         let response = panel_api::sites::create_static_site_handler(
             State(state.clone()),
             actor(999, "admin", "admin"),
+            None,
             Json(request),
         )
         .await
@@ -392,6 +393,7 @@ async fn node_and_python_create_and_reapply_send_valid_optional_nginx_directives
         let response = panel_api::sites::create_static_site_handler(
             State(state.clone()),
             actor(999, "admin", "admin"),
+            None,
             Json(request),
         )
         .await
@@ -470,6 +472,7 @@ async fn php_presets_use_installed_runtime_authoritative_identity_and_health_che
         let response = panel_api::sites::create_static_site_handler(
             State(state.clone()),
             actor(999, "admin", "admin"),
+            None,
             Json(payload),
         )
         .await
@@ -522,6 +525,7 @@ async fn php_provisioning_failures_remove_site_and_pool_instead_of_reporting_suc
         let response = panel_api::sites::create_static_site_handler(
             State(state.clone()),
             actor(999, "admin", "admin"),
+            None,
             Json(payload),
         )
         .await
@@ -841,6 +845,7 @@ async fn same_domain_can_be_deleted_and_recreated_across_runtimes_with_matching_
         let response = panel_api::sites::create_static_site_handler(
             State(state.clone()),
             actor(999, "admin", "admin"),
+            None,
             Json(request),
         )
         .await
@@ -926,6 +931,7 @@ async fn failed_runtime_health_never_publishes_and_failed_cleanup_retains_domain
         let response = panel_api::sites::create_static_site_handler(
             State(state.clone()),
             actor(999, "admin", "admin"),
+            None,
             Json(request),
         )
         .await
@@ -957,6 +963,7 @@ async fn failed_python_delete_does_not_free_the_domain() {
     let response = panel_api::sites::create_static_site_handler(
         State(state.clone()),
         actor(999, "admin", "admin"),
+        None,
         Json(request),
     )
     .await
@@ -1007,6 +1014,7 @@ async fn python_presets_seed_entrypoints_with_the_selected_wsgi_or_asgi_protocol
         let response = panel_api::sites::create_static_site_handler(
             State(state.clone()),
             actor(999, "admin", "admin"),
+            None,
             Json(request),
         )
         .await

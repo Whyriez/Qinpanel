@@ -185,6 +185,10 @@ pub async fn create_job_handler(
         .await
     {
         Ok(res) => res,
+        Err(panel_db::error::DbError::Conflict(_)) => return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":"Identitas tugas sudah digunakan untuk operasi berbeda"})),
+        ).into_response(),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

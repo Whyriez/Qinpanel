@@ -626,7 +626,10 @@ pub async fn healthz_handler() -> impl IntoResponse {
     ),
     tag = "system"
 )]
-pub async fn system_info_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn system_info_handler(
+    State(state): State<AppState>,
+    _auth: crate::auth::RequireAdmin,
+) -> impl IntoResponse {
     let agent_ver = match state.agent_client.version().await {
         Ok(v) => (Some(v.version), true),
         Err(_) => (None, false),

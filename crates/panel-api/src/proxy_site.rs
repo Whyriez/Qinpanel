@@ -257,6 +257,11 @@ pub async fn update_proxy_site_settings_handler(
             };
             return (status, Json(serde_json::json!({ "error": err_str }))).into_response();
         }
+        if let Err((status, message)) =
+            crate::proxy_policy::admit(&state.pool, site.user_id, trimmed).await
+        {
+            return (status, Json(serde_json::json!({"error":message}))).into_response();
+        }
         settings_map.insert(
             "upstream_url".to_string(),
             serde_json::json!(trimmed.to_string()),
@@ -485,8 +490,15 @@ pub async fn probe_proxy_upstream_handler(
         return (status, Json(serde_json::json!({ "error": err_str }))).into_response();
     }
 
+    let admitted =
+        match crate::proxy_policy::admit(&state.pool, site.user_id, &target_upstream).await {
+            Ok(admitted) => admitted,
+            Err((status, message)) => {
+                return (status, Json(serde_json::json!({"error":message}))).into_response();
+            }
+        };
     let probe_req = ProxyUpstreamProbeRequest {
-        upstream_url: target_upstream,
+        upstream_url: admitted.probe_url(),
         timeout_ms: query.timeout_ms,
     };
 

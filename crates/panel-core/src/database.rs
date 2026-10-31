@@ -87,6 +87,21 @@ pub fn tenant_db_prefix(username: &str) -> String {
     }
 }
 
+/// SQL charset/collation tokens are identifiers, never SQL fragments.
+pub fn validate_database_encoding(value: &str) -> Result<(), CoreError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
+        return Err(CoreError::Validation(
+            "Charset atau collation database tidak valid".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Reserved database names across MariaDB and PostgreSQL.
 const RESERVED_DATABASES: &[&str] = &[
     "mysql",

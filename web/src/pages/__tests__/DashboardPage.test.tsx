@@ -12,7 +12,7 @@ describe("Hosting dashboard", () => {
       </AuthProvider>,
     );
     expect(html).toContain("Ringkasan hosting");
-    expect(html).toContain("Memeriksa koneksi");
+    expect(html).not.toContain("Memeriksa koneksi");
     expect(html).toContain("Memuat informasi hosting");
     expect(html).not.toMatch(
       /example\.com|acme\.dev|18\.4%|Phase|axum|RPC|Rust/,

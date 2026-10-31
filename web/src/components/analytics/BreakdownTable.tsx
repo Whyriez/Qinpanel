@@ -1,182 +1,23 @@
-import React, { useState, useMemo } from 'react';
-import { BreakdownItemDto, SiteBreakdownsResponse } from '../../types/api';
-
-export interface BreakdownTableProps {
-  breakdowns: SiteBreakdownsResponse | null;
-  className?: string;
+import { useState } from 'react';
+import { Search, X } from 'lucide-react';
+import type { SiteBreakdownsResponse } from '../../types/api';
+import { useAnalyticsCopy } from './AnalyticsUi';
+export interface BreakdownTableProps { breakdowns: SiteBreakdownsResponse | null; className?: string }
+type DimensionKey = 'paths' | 'referrers' | 'countries' | 'browsers' | 'os' | 'devices' | 'slow_urls' | 'error_urls';
+export function BreakdownTable({ breakdowns, className = '' }: BreakdownTableProps) {
+  const { text } = useAnalyticsCopy();
+  const [dimension, setDimension] = useState<DimensionKey>('paths'), [search, setSearch] = useState(''), [limit, setLimit] = useState(10);
+  const dimensions: { key: DimensionKey; label: string }[] = [
+    { key: 'paths', label: text('Halaman', 'Pages') }, { key: 'referrers', label: text('Sumber trafik', 'Referrers') }, { key: 'countries', label: text('Negara', 'Countries') }, { key: 'browsers', label: 'Browser' }, { key: 'os', label: text('Sistem operasi', 'Operating systems') }, { key: 'devices', label: text('Perangkat', 'Devices') }, { key: 'slow_urls', label: text('URL lambat', 'Slow URLs') }, { key: 'error_urls', label: text('URL error', 'Error URLs') },
+  ];
+  const label = dimensions.find(item => item.key === dimension)!.label;
+  const all = breakdowns?.[dimension] ?? [];
+  const items = all.filter(item => item.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  return <section className={`analytics-breakdowns analytics-breakdown-card ${className}`} aria-label={text('Rincian trafik', 'Traffic breakdowns')}>
+    <header><div><h3>{text('Kenali sumber trafik Anda', 'Understand your traffic')}</h3><p>{text('Telusuri halaman, sumber kunjungan, dan perangkat yang paling aktif.', 'Explore your most active pages, traffic sources and devices.')}</p></div><span>{text('Maksimal 15 hasil per dimensi', 'Up to 15 results per dimension')}</span></header>
+    <div className="analytics-breakdown-tabs" role="group" aria-label={text('Dimensi trafik', 'Traffic dimension')}>{dimensions.map(item => <button type="button" key={item.key} aria-pressed={dimension === item.key} onClick={() => { setDimension(item.key); setSearch(''); }}>{item.label}</button>)}</div>
+    <div className="analytics-table-toolbar"><label className="analytics-table-search"><Search size={15} aria-hidden="true" /><input type="search" aria-label={text('Cari rincian trafik', 'Search traffic breakdowns')} placeholder={`${text('Cari', 'Search')} ${label.toLowerCase()}...`} value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" aria-label={text('Hapus pencarian rincian', 'Clear breakdown search')} onClick={() => setSearch('')}><X size={14} /></button>}</label><label>{text('Tampilkan', 'Show')}<select aria-label={text('Jumlah rincian', 'Breakdown rows')} value={limit} onChange={event => setLimit(Number(event.target.value))}><option value={5}>5</option><option value={10}>10</option><option value={15}>15</option></select></label></div>
+    {items.length ? <div className="analytics-table-scroll"><table><thead><tr><th scope="col">{label}</th><th scope="col">{text('Jumlah', 'Count')}</th><th scope="col">{text('Porsi', 'Share')}</th></tr></thead><tbody>{items.slice(0, limit).map((item, index) => <tr key={`${item.name}:${index}`}><td><span className="analytics-table-rank">{index + 1}</span><span className={dimension === 'paths' || dimension.endsWith('urls') ? 'analytics-table-path' : ''}>{item.name}</span></td><td>{item.count.toLocaleString()}</td><td><div className="analytics-table-share"><span><i style={{ width: `${Math.max(0, Math.min(100, item.percentage))}%` }} /></span><strong>{item.percentage.toFixed(1)}%</strong></div></td></tr>)}</tbody></table></div> : <div className="analytics-breakdown-empty"><Search size={22} /><h4>{search ? text('Tidak ada hasil yang cocok', 'No matching results') : text('Belum ada rincian untuk periode ini', 'No breakdowns for this period')}</h4><p>{search ? text('Coba nama lain atau hapus pencarian.', 'Try another name or clear the search.') : text('Ubah dimensi atau periode untuk melihat data lainnya.', 'Choose another dimension or period to explore more data.')}</p></div>}
+    <footer>{Math.min(items.length, limit)} / {items.length} {text('hasil tersaji', 'available results')}</footer>
+  </section>;
 }
-
-type DimensionKey =
-  | 'paths'
-  | 'referrers'
-  | 'countries'
-  | 'browsers'
-  | 'os'
-  | 'devices'
-  | 'slow_urls'
-  | 'error_urls';
-
-interface DimensionConfig {
-  key: DimensionKey;
-  label: string;
-  icon: string;
-  columnHeader: string;
-}
-
-const DIMENSIONS: DimensionConfig[] = [
-  { key: 'paths', label: 'Jalur (Paths)', icon: '📄', columnHeader: 'Path URL' },
-  { key: 'referrers', label: 'Perujuk (Referrers)', icon: '🔗', columnHeader: 'Domain Perujuk' },
-  { key: 'countries', label: 'Negara (GeoIP)', icon: '🌍', columnHeader: 'Negara' },
-  { key: 'browsers', label: 'Browser', icon: '🌐', columnHeader: 'Peramban' },
-  { key: 'os', label: 'Sistem Operasi', icon: '💻', columnHeader: 'Sistem Operasi' },
-  { key: 'devices', label: 'Perangkat', icon: '📱', columnHeader: 'Tipe Perangkat' },
-  { key: 'slow_urls', label: 'URL Lambat', icon: '⏱️', columnHeader: 'Jalur Eksekusi' },
-  { key: 'error_urls', label: 'URL Error', icon: '⚠️', columnHeader: 'Jalur Error' },
-];
-
-export const BreakdownTable: React.FC<BreakdownTableProps> = ({
-  breakdowns,
-  className = '',
-}) => {
-  const [activeDimension, setActiveDimension] = useState<DimensionKey>('paths');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [limit, setLimit] = useState<number>(10);
-
-  const currentItems = useMemo<BreakdownItemDto[]>(() => {
-    if (!breakdowns) return [];
-    const list = breakdowns[activeDimension] || [];
-    if (!searchQuery.trim()) return list;
-    const q = searchQuery.toLowerCase();
-    return list.filter((item) => item.name.toLowerCase().includes(q));
-  }, [breakdowns, activeDimension, searchQuery]);
-
-  const displayedItems = currentItems.slice(0, limit);
-  const currentDimConfig = DIMENSIONS.find((d) => d.key === activeDimension) || DIMENSIONS[0];
-
-  return (
-    <div className={`bg-[var(--surface)] border border-[var(--line)] rounded-xl p-5 shadow-sm ${className}`}>
-      {/* Header and Dimension Switcher */}
-      <div className="flex flex-col gap-4 mb-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-base font-semibold text-[var(--ink)]">
-            Rincian Dimensi Lalu Lintas
-          </h3>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              placeholder={`Cari di ${currentDimConfig.label}...`}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="px-3 py-1.5 text-xs bg-[var(--bg)] border border-[var(--line)] rounded-lg text-[var(--ink)] placeholder-[var(--ink-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--primary)]"
-            />
-            <select
-              value={limit}
-              onChange={(e) => setLimit(Number(e.target.value))}
-              className="px-2.5 py-1.5 text-xs bg-[var(--bg)] border border-[var(--line)] rounded-lg text-[var(--ink)] focus:outline-none"
-            >
-              <option value={5}>Top 5</option>
-              <option value={10}>Top 10</option>
-              <option value={25}>Top 25</option>
-              <option value={50}>Top 50</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Tab Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 border-b border-[var(--line)]">
-          {DIMENSIONS.map((dim) => {
-            const isActive = activeDimension === dim.key;
-            const count = breakdowns ? (breakdowns[dim.key] || []).length : 0;
-            return (
-              <button
-                key={dim.key}
-                type="button"
-                onClick={() => {
-                  setActiveDimension(dim.key);
-                  setSearchQuery('');
-                }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                  isActive
-                    ? 'bg-[var(--primary)] text-white shadow-sm'
-                    : 'text-[var(--ink-muted)] hover:text-[var(--ink)] hover:bg-[var(--surface-hover)]'
-                }`}
-              >
-                <span>{dim.icon}</span>
-                <span>{dim.label}</span>
-                {count > 0 && (
-                  <span
-                    className={`ml-1 text-[10px] px-1.5 py-0.2 rounded-full ${
-                      isActive ? 'bg-white/20 text-white' : 'bg-[var(--line)] text-[var(--ink-muted)]'
-                    }`}
-                  >
-                    {count}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Table Content */}
-      {displayedItems.length === 0 ? (
-        <div className="flex flex-col items-center justify-center p-8 text-center text-sm text-[var(--ink-muted)]">
-          <p>Tidak ada data ditemukan untuk {currentDimConfig.label}.</p>
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => setSearchQuery('')}
-              className="mt-2 text-xs text-[var(--primary)] hover:underline"
-            >
-              Hapus filter pencarian
-            </button>
-          )}
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs border-collapse">
-            <thead>
-              <tr className="border-b border-[var(--line)] text-[var(--ink-muted)]">
-                <th className="py-2.5 px-3 font-medium w-12 text-center">#</th>
-                <th className="py-2.5 px-3 font-medium">{currentDimConfig.columnHeader}</th>
-                <th className="py-2.5 px-3 font-medium text-right w-28">Jumlah</th>
-                <th className="py-2.5 px-3 font-medium w-48 text-right">Porsi</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--line)]">
-              {displayedItems.map((item, idx) => (
-                <tr
-                  key={`${item.name}-${idx}`}
-                  className="hover:bg-[var(--surface-hover)] transition-colors group"
-                >
-                  <td className="py-2.5 px-3 text-center text-[var(--ink-muted)] font-mono">
-                    {idx + 1}
-                  </td>
-                  <td className="py-2.5 px-3 font-medium text-[var(--ink)] break-all max-w-md">
-                    <span className="font-mono text-[11px] select-all">{item.name}</span>
-                  </td>
-                  <td className="py-2.5 px-3 text-right text-[var(--ink)] font-mono font-medium">
-                    {item.count.toLocaleString()}
-                  </td>
-                  <td className="py-2.5 px-3 text-right">
-                    <div className="flex items-center justify-end gap-2.5">
-                      <div className="w-24 bg-[var(--line)] h-2 rounded-full overflow-hidden flex-shrink-0">
-                        <div
-                          className="bg-[var(--primary)] h-full rounded-full transition-all duration-300"
-                          style={{ width: `${Math.min(Math.max(item.percentage, 1), 100)}%` }}
-                        />
-                      </div>
-                      <span className="w-10 text-[11px] font-mono text-[var(--ink-muted)]">
-                        {item.percentage.toFixed(1)}%
-                      </span>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-};

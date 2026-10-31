@@ -32,6 +32,7 @@ use tower::ServiceExt;
 
 struct TestContext {
     app: axum::Router,
+    runner: Arc<MockSystemRunner>,
     pool: panel_db::pool::DbPool,
     _temp: tempfile::TempDir,
     _shutdown_tx: tokio::sync::broadcast::Sender<()>,
@@ -280,6 +281,7 @@ async fn setup_test_context() -> TestContext {
 
     TestContext {
         app,
+        runner,
         pool,
         _temp: tmp,
         _shutdown_tx: shutdown_tx,
@@ -442,6 +444,9 @@ async fn test_node_site_full_lifecycle_and_security() {
     let job_bytes = job_res.into_body().collect().await.unwrap().to_bytes();
     let job_json: Value = serde_json::from_slice(&job_bytes).unwrap();
     assert_eq!(job_json["success"], true);
+    let actions = format!("{:?}", ctx.runner.recorded_actions());
+    assert!(actions.contains("--uid=10001"));
+    assert!(!actions.contains(&format!("\"--uid={}\"", ctx.alice_id)));
 
     // 5. Get and Update settings
     let get_settings_req = Request::builder()

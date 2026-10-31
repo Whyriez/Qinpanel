@@ -964,8 +964,16 @@ pub async fn webhook_deploy_handler(
         }
     };
 
-    // Signature verification if webhook_secret is configured
-    if let Some(expected_secret) = &config.webhook_secret {
+    // Legacy or cleared secrets must never turn a public route into an
+    // unauthenticated deployment trigger.
+    let Some(expected_secret) = config
+        .webhook_secret
+        .as_deref()
+        .filter(|secret| !secret.trim().is_empty())
+    else {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"Webhook dinonaktifkan sampai secret diatur ulang melalui konfigurasi Git."}))).into_response();
+    };
+    {
         let is_github = headers.get("X-Hub-Signature-256").is_some();
         let is_gitlab = headers.get("X-Gitlab-Token").is_some();
 

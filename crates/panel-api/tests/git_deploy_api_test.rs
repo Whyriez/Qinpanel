@@ -33,6 +33,7 @@ use tower::ServiceExt;
 
 struct TestContext {
     app: axum::Router,
+    runner: Arc<MockSystemRunner>,
     #[allow(dead_code)]
     pool: panel_db::pool::DbPool,
     _temp: tempfile::TempDir,
@@ -81,6 +82,12 @@ async fn setup_test_context() -> TestContext {
 
     let nginx_dir = tmp.path().join("etc/nginx");
     let runner = Arc::new(MockSystemRunner::new());
+    runner.set_response(
+        "getent passwd p_alice",
+        0,
+        b"p_alice:x:10001:10001::/home/p_alice:/bin/bash\n",
+        b"",
+    );
     runner.set_response("nginx", 0, b"syntax is ok", b"");
     runner.set_response("systemctl", 0, b"", b"");
     runner.set_response("setfacl", 0, b"", b"");
@@ -250,6 +257,7 @@ async fn setup_test_context() -> TestContext {
 
     TestContext {
         app,
+        runner,
         pool,
         _temp: tmp,
         _shutdown_tx: shutdown_tx,
@@ -403,6 +411,15 @@ async fn test_git_deploy_full_workflow() {
     assert_eq!(list[0].id, deploy_out.id);
 
     // 6. POST /api/v1/sites/{id}/git/rollback
+    // The runner records tenant mkdir/clone/ln commands without executing them.
+    // Seed their filesystem effects before exercising rollback's existence guard.
+    let base = std::path::Path::new("/home/p_alice/sites/example.com");
+    let release = base.join("releases").join(&deploy_out.release_id);
+    ctx.runner.add_existing_path(&release);
+    ctx.runner.add_existing_path(release.join("dist"));
+    ctx.runner
+        .create_symlink(&release.join("dist"), &base.join("current"))
+        .expect("mock active release");
     let rollback_payload = RollbackDeployRequest {
         target_release_id: deploy_out.release_id.clone(),
     };

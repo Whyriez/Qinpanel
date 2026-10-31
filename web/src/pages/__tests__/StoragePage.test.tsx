@@ -27,7 +27,7 @@ describe('Storage page', () => {
     const html = renderToString(<BucketWorkspace admin={false} impersonated={false} connection={connection} english={false} onBusy={vi.fn()} />);
     expect(html).toContain('storage-explorer');
     expect(html).toContain('Tampilan grid');
-    expect(html).toContain('Cari di halaman ini');
+    expect(html).toContain('Cari file dan folder');
   });
   it('supports English copy and scoped project access', async () => {
     await i18n.changeLanguage('en');

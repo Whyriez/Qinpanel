@@ -68,6 +68,11 @@ fn classify(ip: IpAddr) -> AddressClass {
     }
 }
 
+/// Public-only network admission shared by adapters that pin resolved IPs.
+pub fn is_public_destination(ip: IpAddr) -> bool {
+    classify(ip) == AddressClass::Public
+}
+
 /// Server-side approval bound to exact connection, revision, origin and addresses.
 /// It cannot be deserialized from a caller's allow_private flag or request body.
 #[derive(Debug, Clone)]

@@ -55,6 +55,8 @@ export function CommandPalette({ isOpen: controlledOpen, onClose, onOpen, onNavi
   const isControlled = controlledOpen !== undefined;
   const isVisible = isControlled ? controlledOpen : open;
   const isAdmin = user?.role === 'admin';
+  const navLabel = (id: string) => t(id === 'jobs' && !isAdmin ? 'nav.activity' : `nav.${id}`);
+  const description = (id: string) => t(id === 'jobs' && !isAdmin ? 'palette.descriptions.activity' : `palette.descriptions.${id}`);
   const nextLanguage = i18n.language.startsWith('id') ? 'en' : 'id';
   const clearSearch = () => { setSearch(''); inputRef.current?.focus(); };
 
@@ -80,19 +82,20 @@ export function CommandPalette({ isOpen: controlledOpen, onClose, onOpen, onNavi
 
   const selectPage = (page: string) => { onNavigate(page); handleClose(); };
   const renderNavigation = (admin: boolean) => navigation
+    .filter(item => item.id !== 'connectivity' || isAdmin)
     .filter(item => isAdminOnlyRoute(`/${item.id}`) === admin)
     .map(({ id, icon: Icon }) => (
       <Command.Item
         key={id}
         value={`page-${id}`}
-        keywords={[t(`nav.${id}`), t(`palette.descriptions.${id}`), id]}
+        keywords={[navLabel(id), description(id), id]}
         onSelect={() => selectPage(id)}
         className="command-item"
       >
         <Icon className="command-item-icon" aria-hidden="true" />
         <span className="command-item-copy">
-          <span className="command-item-title">{t(`nav.${id}`)}</span>
-          <span className="command-item-description">{t(`palette.descriptions.${id}`)}</span>
+          <span className="command-item-title">{navLabel(id)}</span>
+          <span className="command-item-description">{description(id)}</span>
         </span>
         {activeNav === id && <span className="command-item-meta"><Check size={13} aria-hidden="true" />{t('palette.currentPage')}</span>}
         <CornerDownLeft className="command-item-enter" aria-hidden="true" />

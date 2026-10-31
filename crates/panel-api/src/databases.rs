@@ -744,6 +744,16 @@ pub async fn create_database_handler(
         .character_set
         .unwrap_or_else(|| "utf8mb4".to_string());
 
+    if let Err(error) = panel_core::database::validate_database_encoding(&collation)
+        .and_then(|()| panel_core::database::validate_database_encoding(&character_set))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":error.to_string()})),
+        )
+            .into_response();
+    }
+
     // 6. Check name uniqueness and live engine availability before any mutation.
     if let Err((status, error)) =
         check_database_creation_availability(&state, &db_repo, engine, &full_db_name).await

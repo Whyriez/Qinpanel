@@ -11,6 +11,44 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::test]
+async fn terminal_rejects_privileged_or_mismatched_identity_before_spawn() {
+    let manager =
+        PtySessionManager::new(PtyManagerConfig::default(), Arc::new(MockPtyBackend::new()));
+    for (uid, gid) in [
+        (0, 0),
+        (999, 999),
+        (10001, 0),
+        (10001, 10002),
+        (60000, 60000),
+    ] {
+        assert!(
+            manager
+                .open_session(PtyOpenRequest {
+                    username: "p_alice".into(),
+                    uid,
+                    gid,
+                    cwd: None,
+                    rows: 24,
+                    cols: 80,
+                    term: None,
+                    max_sessions: None,
+                    idle_timeout_secs: None,
+                })
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        manager
+            .list_sessions(PtyListRequest { username: None })
+            .await
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn test_pty_session_lifecycle() {
     let temp_home = tempfile::tempdir().expect("tempdir");
     let alice_home = temp_home.path().join("p_alice");

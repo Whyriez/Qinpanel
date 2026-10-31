@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { JobItem, JobProgressEvent } from '../types/api';
 import { fetchJobs, fetchJobDetail, fetchJobLogs, cancelJob, subscribeJobEvents } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import { JobQueueNotice } from '../components/jobs/JobQueueNotice';
 import { JobLogEntry } from '../components/jobs/JobLogEntry';
 import { jobProgressMessage, jobSnapshotEvent, mergeJobEvents, canCancelJob, jobTitle, jobProgressLabel, isServerBackupJob, serverBackupJobDetail } from '../lib/jobProgress';
@@ -20,6 +21,9 @@ import { EmptyState } from '../components/ui/EmptyState';
 
 export const JobsPage: React.FC = () => {
   const { t } = useTranslation();
+  const { user } = useAuth();
+  const tenant = user?.role !== 'admin';
+  const copy = (key: string) => t(`${tenant ? 'activity' : 'jobs'}.${key}`);
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +61,7 @@ export const JobsPage: React.FC = () => {
       setTotalPages(res.total_pages || 1);
       setTotalItems(res.total);
     } catch (err: unknown) {
-      if (revision === listRevision.current) setError(err instanceof Error ? err.message : 'Gagal memuat daftar tugas.');
+      if (revision === listRevision.current) setError(err instanceof Error ? err.message : 'Gagal memuat daftar proses.');
     } finally {
       if (listPending.current === revision) {
         listPending.current = null;
@@ -78,7 +82,7 @@ export const JobsPage: React.FC = () => {
     let active = true;
     void fetchJobDetail(id).then(job => {
       if (active) { setActiveStreamJob(job); setStreamEvents([jobSnapshotEvent(job)]); }
-    }).catch(() => { if (active) setError('Tugas yang ditautkan tidak dapat dimuat.'); });
+    }).catch(() => { if (active) setError('Proses yang ditautkan tidak dapat dimuat.'); });
     return () => { active = false; };
   }, []);
 
@@ -91,7 +95,7 @@ export const JobsPage: React.FC = () => {
         setActiveStreamJob(updated);
       }
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'Gagal membatalkan tugas');
+      alert(err instanceof Error ? err.message : 'Gagal membatalkan proses');
     }
   };
 
@@ -205,10 +209,10 @@ export const JobsPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-[var(--ink)]">
-            {t('jobs.title')}
+            {copy('title')}
           </h1>
           <p className="text-xs text-[var(--ink-muted)] mt-1">
-            {t('jobs.subtitle')}
+            {copy('subtitle')}
           </p>
         </div>
 
@@ -250,7 +254,7 @@ export const JobsPage: React.FC = () => {
         </div>
 
         <div className="text-xs text-[var(--ink-muted)]">
-          Total: <span className="font-semibold text-[var(--ink)]">{totalItems}</span> tugas
+          Total: <span className="font-semibold text-[var(--ink)]">{totalItems}</span> {copy('unit')}
         </div>
       </div>
 
@@ -260,7 +264,7 @@ export const JobsPage: React.FC = () => {
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="border-b border-[var(--line)] bg-[var(--raised)]/50 text-[var(--ink-muted)] font-medium">
-                <th className="py-2.5 px-4">Nama Tugas</th>
+                <th className="py-2.5 px-4">{copy('name')}</th>
                 <th className="py-2.5 px-4 w-44">Progres</th>
                 <th className="py-2.5 px-4">Status</th>
                 <th className="py-2.5 px-4">Percobaan</th>
@@ -273,7 +277,7 @@ export const JobsPage: React.FC = () => {
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-xs text-[var(--ink-muted)]">
                     <EmptyState
-                      title="Tidak ada tugas"
+                      title={copy('empty')}
                       description="Belum ada operasi latar belakang yang dijalankan atau cocok dengan filter."
                     />
                   </td>
@@ -336,7 +340,7 @@ export const JobsPage: React.FC = () => {
                           <button
                             onClick={() => handleCancel(job.id)}
                             className="p-1 rounded text-[var(--danger)] hover:bg-[var(--danger)]/10 cursor-pointer"
-                            title="Batalkan Tugas"
+                            title={copy('cancel')}
                           >
                             <Ban className="w-3.5 h-3.5" />
                           </button>
@@ -438,7 +442,7 @@ export const JobsPage: React.FC = () => {
                   <span className="font-medium">Log instalasi dan progres:</span>
                   <label className="inline-flex items-center gap-2 py-2 cursor-pointer"><input type="checkbox" checked={followLog} onChange={event => setFollowLog(event.target.checked)} />Ikuti log terbaru</label>
                 </div>
-                <div ref={logView} role="log" aria-label="Log progres tugas" tabIndex={0} onScroll={event => {
+                <div ref={logView} role="log" aria-label={copy('progressLog')} tabIndex={0} onScroll={event => {
                   const view = event.currentTarget;
                   if (view.scrollHeight - view.scrollTop - view.clientHeight >= 40) setFollowLog(false);
                 }} className="min-w-0 max-h-[45vh] overflow-y-auto p-3 bg-[var(--raised)] border border-[var(--line)] rounded-[var(--radius-sm)] font-mono text-xs leading-[18px] text-[var(--ink)] focus-visible:outline-2 focus-visible:outline-[var(--primary)]">
@@ -454,7 +458,7 @@ export const JobsPage: React.FC = () => {
                     onClick={() => handleCancel(activeStreamJob.id)}
                     className="py-1 px-3 rounded bg-[var(--danger)] text-white text-xs font-semibold cursor-pointer"
                   >
-                    Batalkan Tugas
+                    {copy('cancel')}
                   </button>
                 </div>
               )}

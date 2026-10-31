@@ -34,7 +34,8 @@
       "plans": "Resource limits and access",
       "runtime": "PHP and Node.js versions",
       "audit": "Panel activity records",
-      "settings": "Panel configuration and security"
+      "settings": "Panel configuration and security",
+      "activity": "Progress and history of backups, imports and file operations"
     }
   },
   "common": {
@@ -69,7 +70,8 @@
     "settings": "Settings",
     "files": "Files",
     "terminal": "Terminal",
-    "profile": "Profile & Security"
+    "profile": "Profile & Security",
+    "activity": "Activity"
   },
   "dashboard": {
     "overview": "All services operating normally",
@@ -202,15 +204,20 @@
   "jobs": {
     "title": "Background Job Queue",
     "subtitle": "List of asynchronous operations and real-time progress tracking",
-    "name": "Job Name",
+    "name": "Task name",
     "progress": "Progress",
     "status": "Status",
     "created": "Started At",
-    "cancel": "Cancel job",
+    "cancel": "Cancel task",
     "activeCount": "{{count}} active",
+    "trayActiveCount": "{{label}} ({{count}} active)",
     "trayTitle": "Background Tasks",
     "noJobs": "No active background tasks",
-    "viewAll": "Open job queue"
+    "viewAll": "Open job queue",
+    "trayHint": "Open the background task queue",
+    "unit": "tasks",
+    "empty": "No tasks",
+    "progressLog": "Task progress log"
   },
   "wizard": {
     "title": "Initial Setup Wizard",
@@ -257,7 +264,8 @@
       "rules": "Site Rules",
       "deploy": "Git Deploy",
       "backups": "Backups",
-      "settings": "Settings"
+      "settings": "Settings",
+      "connections": "Connection info"
     },
     "wizard": {
       "title": "Site Creation Wizard",
@@ -779,5 +787,18 @@
     "description": "This page may have moved, been removed, or the address may be incorrect. Continue managing your hosting from one of these pages.",
     "dashboard": "Go to dashboard",
     "sites": "View sites"
+  },
+  "activity": {
+    "title": "Activity",
+    "subtitle": "Track your background operations, such as backups, database imports and exports, and file archiving.",
+    "trayTitle": "Recent activity",
+    "noJobs": "No active operations",
+    "viewAll": "View all activity",
+    "trayHint": "Open background activity",
+    "unit": "activities",
+    "name": "Activity name",
+    "empty": "No activity yet",
+    "cancel": "Cancel operation",
+    "progressLog": "Activity progress log"
   }
 }

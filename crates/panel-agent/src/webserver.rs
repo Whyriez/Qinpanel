@@ -657,7 +657,20 @@ impl NginxManager {
             let path_arg = path.to_string_lossy();
             let output = self
                 .runner
-                .run_command("setfacl", &["-P", "-m", &acl, "--", &path_arg])
+                .run_command(
+                    "runuser",
+                    &[
+                        "-u",
+                        username.as_str(),
+                        "--",
+                        "/usr/bin/setfacl",
+                        "-P",
+                        "-m",
+                        &acl,
+                        "--",
+                        &path_arg,
+                    ],
+                )
                 .map_err(|error| {
                     AgentError::InvalidInput(format!(
                         "ACL Nginx gagal pada {}: {error}",
@@ -1273,7 +1286,7 @@ mod tests {
                 };
                 let position = actions.iter().position(|action| matches!(action,
                     crate::system::MockAction::Command { binary, args }
-                    if binary == "setfacl" && args.len() == 5 && args[..4] == ["-P", "-m", acl, "--"] && Path::new(&args[4]) == path
+                    if binary == "runuser" && args.len() == 9 && args[..8] == ["-u", "p_alice", "--", "/usr/bin/setfacl", "-P", "-m", acl, "--"] && Path::new(&args[8]) == path
                 )).unwrap_or_else(|| panic!("missing ACL for {}", path.display()));
                 assert!(position < index);
             }
@@ -1310,7 +1323,7 @@ mod tests {
                 .recorded_actions()
                 .iter()
                 .all(|action| matches!(action,
-                    crate::system::MockAction::Command { binary, .. } if binary == "setfacl"
+                    crate::system::MockAction::Command { binary, .. } if binary == "runuser"
                 ))
         );
     }
@@ -1321,7 +1334,10 @@ mod tests {
         let manager = NginxManager::new(runner.clone());
         let sites = Path::new("/home/p_alice").join("sites");
         runner.set_response(
-            &format!("setfacl -P -m u:www-data:--x -- {}", sites.display()),
+            &format!(
+                "runuser -u p_alice -- /usr/bin/setfacl -P -m u:www-data:--x -- {}",
+                sites.display()
+            ),
             1,
             b"",
             b"Operation not supported",

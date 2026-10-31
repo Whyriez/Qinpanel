@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AllocationEditor, BucketPolicy, RulesEditor, storageBytes } from './BucketPolicy';
 import { ObjectDetail } from './ObjectExplorer';
 import { AccessEditor, OwnerBucketWorkspace } from './BucketAccess';
+import { StorageConnectionPanel } from './StorageConnectionPanel';
 import type { StorageConnection, StoragePolicy } from '../../api/storage';
 
 const policy: StoragePolicy = { revision: 1, quota_bytes: 1073741824, used_bytes: null, object_count: null, measured_at: null, visibility: 'owner', enforcement: 'panel', rules: { read: true, write: true, delete: true, max_file_bytes: 33554432, extensions: [] } };
@@ -60,5 +61,20 @@ describe('Bucket workspace', () => {
     const html = renderToString(<ObjectDetail connection={{ ...connection, managed: false }} object={{ key: 'document.svg', size: 100, modified_at: '2026-10-29T13:45:09Z' }} english disabled={false} canDelete={false} onClose={vi.fn()} onDelete={vi.fn()} />);
     expect(html).toContain('Anyone with the signed URL can open'); expect(html).toContain('Preview unavailable');
     expect(html).not.toContain('<img');
+  });
+  it('keeps rules visible with permission switches, presets and a disabled unchanged save', () => {
+    const html = renderToString(<RulesEditor policy={policy} english={false} disabled={false} onSave={vi.fn()} />);
+    expect(html).not.toContain('<details');
+    expect(html.match(/role="switch"/g)).toHaveLength(3);
+    expect(html).toContain('Preset ekstensi');
+    expect(html).toContain('Pengaturan sudah tersimpan');
+    expect(html).toContain('Batalkan perubahan');
+  });
+  it('groups S3 connection details, copy controls, application keys and environment without real secrets', () => {
+    const html = renderToString(<StorageConnectionPanel connection={{ ...connection, endpoint: 'https://storage.example.test', provider: 'compatible', region: 'us-east-1', addressing: 'path' }} english={false} disabled={false} onTest={vi.fn()} onKeys={vi.fn()}><p>Project binding</p></StorageConnectionPanel>);
+    expect(html).toContain('Salin Endpoint'); expect(html).toContain('Salin konfigurasi');
+    expect(html).toContain('Kelola access key'); expect(html).toContain('Project binding');
+    expect(html).toContain('AWS_SECRET_ACCESS_KEY=&lt;secret-access-key&gt;');
+    expect(html).not.toContain('<details');
   });
 });

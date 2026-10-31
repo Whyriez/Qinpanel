@@ -47,6 +47,7 @@ server {
     include {{ snippets_dir }}/acme.conf;
     include {{ snippets_dir }}/security-headers.conf;
     include {{ snippets_dir }}/deny-sensitive.conf;
+    disable_symlinks if_not_owner;
     {% if site_rules_block %}
     {{ site_rules_block | safe }}
     {% else %}

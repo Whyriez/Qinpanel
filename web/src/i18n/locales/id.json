@@ -34,7 +34,8 @@
       "plans": "Batas sumber daya dan akses",
       "runtime": "Versi PHP dan Node.js",
       "audit": "Catatan aktivitas panel",
-      "settings": "Konfigurasi panel dan keamanan"
+      "settings": "Konfigurasi panel dan keamanan",
+      "activity": "Progres dan riwayat backup, impor, dan operasi file"
     }
   },
   "common": {
@@ -69,7 +70,8 @@
     "settings": "Pengaturan",
     "files": "Berkas",
     "terminal": "Terminal",
-    "profile": "Profil dan keamanan"
+    "profile": "Profil dan keamanan",
+    "activity": "Aktivitas"
   },
   "dashboard": {
     "overview": "Semua layanan normal",
@@ -201,15 +203,20 @@
   "jobs": {
     "title": "Antrean Tugas Sistem",
     "subtitle": "Daftar proses latar belakang dan pemantauan progres real-time",
-    "name": "Nama Tugas",
+    "name": "Nama tugas",
     "progress": "Progres",
     "status": "Status",
     "created": "Waktu Mulai",
     "cancel": "Batalkan tugas",
     "activeCount": "{{count}} aktif",
+    "trayActiveCount": "{{label}} ({{count}} aktif)",
     "trayTitle": "Tugas Latar Belakang",
     "noJobs": "Tidak ada tugas yang sedang aktif",
-    "viewAll": "Buka antrean tugas"
+    "viewAll": "Buka antrean tugas",
+    "trayHint": "Buka antrean tugas latar belakang",
+    "unit": "tugas",
+    "empty": "Tidak ada tugas",
+    "progressLog": "Log progres tugas"
   },
   "wizard": {
     "title": "Setup Awal Qinpanel",
@@ -256,7 +263,8 @@
       "rules": "Aturan Situs",
       "deploy": "Deploy Git",
       "backups": "Cadangan",
-      "settings": "Pengaturan"
+      "settings": "Pengaturan",
+      "connections": "Informasi koneksi"
     },
     "wizard": {
       "title": "Wizard Pembuatan Situs",
@@ -778,5 +786,18 @@
     "description": "Halaman ini mungkin sudah dipindahkan, dihapus, atau alamatnya tidak tepat. Lanjutkan pengelolaan hosting Anda dari halaman berikut.",
     "dashboard": "Ke beranda",
     "sites": "Lihat situs"
+  },
+  "activity": {
+    "title": "Aktivitas",
+    "subtitle": "Pantau proses Anda, seperti backup, impor dan ekspor database, serta pengarsipan file.",
+    "trayTitle": "Aktivitas terbaru",
+    "noJobs": "Tidak ada proses yang sedang aktif",
+    "viewAll": "Lihat semua aktivitas",
+    "trayHint": "Buka aktivitas latar belakang",
+    "unit": "aktivitas",
+    "name": "Nama aktivitas",
+    "empty": "Belum ada aktivitas",
+    "cancel": "Batalkan proses",
+    "progressLog": "Log progres aktivitas"
   }
 }

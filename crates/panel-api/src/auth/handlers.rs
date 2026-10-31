@@ -24,6 +24,10 @@ use super::middleware::{RequireAuth, RequireCsrf};
 use super::session::{build_clear_session_cookie, build_session_cookie};
 use crate::routes::AppState;
 
+// Bound Argon2's memory/CPU usage even when requests arrive concurrently.
+static LOGIN_VERIFICATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+static LOGIN_REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
     #[schema(example = "admin")]
@@ -119,6 +123,37 @@ pub async fn login_handler(
     req_headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Response {
+    if payload.username.is_empty()
+        || payload.username.len() > 32
+        || payload.password.len() > 4096
+        || payload.code.as_ref().is_some_and(|code| code.len() > 128)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"Format kredensial tidak valid"})),
+        )
+            .into_response();
+    }
+    let _request_permit = match LOGIN_REQUESTS.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Terlalu banyak proses login. Coba kembali sebentar lagi."}))).into_response(),
+    };
+    let permit =
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            LOGIN_VERIFICATIONS.acquire(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            _ => return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(
+                    serde_json::json!({"error":"Antrean login penuh. Coba kembali sebentar lagi."}),
+                ),
+            )
+                .into_response(),
+        };
     let client_ip = crate::audit::extract_client_ip(&req_headers);
 
     // 1. Check account lockout status
@@ -179,7 +214,14 @@ pub async fn login_handler(
     };
 
     // 3. Verify password hash using Argon2id
-    let is_valid = verify_password(&payload.password, &user.password_hash).unwrap_or(false);
+    let password = payload.password;
+    let hash = user.password_hash.clone();
+    let is_valid = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_password(&password, &hash).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
     if !is_valid {
         let lockout = state.lockout_manager.record_failure(&payload.username);
         let _ = state
@@ -733,6 +775,9 @@ pub async fn two_factor_enable_handler(
     RequireCsrf(user): RequireCsrf,
     Json(payload): Json<TwoFactorEnableRequest>,
 ) -> Response {
+    if user.totp_enabled {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"2FA sudah aktif. Verifikasi dan nonaktifkan faktor lama sebelum menggantinya."}))).into_response();
+    }
     // 1. Verify code against provided secret
     if !verify_totp_code(&payload.secret, &payload.code, &user.username) {
         return (
@@ -757,26 +802,11 @@ pub async fn two_factor_enable_handler(
         .map(|code| hash_recovery_code(code))
         .collect();
 
-    let recovery_repo = SqliteRecoveryCodeRepository::new(state.pool.clone());
-    if let Err(e) = recovery_repo.replace_codes(user.id, &recovery_hashes).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("Failed to save recovery codes: {}", e) })),
-        )
-            .into_response();
-    }
-
-    // 3. Update user to enable TOTP and store secret
     let user_repo = SqliteUserRepository::new(state.pool.clone());
-    if let Err(e) = user_repo
-        .update_totp(user.id, Some(&payload.secret), true)
-        .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("Failed to enable TOTP on user: {}", e) })),
-        )
-            .into_response();
+    match user_repo.enable_totp_if_disabled(user.id, &user.session_id, &payload.secret, &recovery_hashes).await {
+        Ok(true) => {},
+        Ok(false) => return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"Faktor atau sesi telah berubah. Masuk kembali sebelum melanjutkan."}))).into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"Aktivasi 2FA dibatalkan; silakan coba kembali."}))).into_response(),
     }
 
     state.audit_writer.log_async(

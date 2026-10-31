@@ -141,6 +141,14 @@ impl PtySessionManager {
             Username::parse(&req.username).map_err(|e| AgentError::InvalidInput(e.to_string()))?;
         let username_str = username.as_str();
 
+        panel_core::tenant::TenantUid::parse(req.uid)
+            .map_err(|error| AgentError::InvalidInput(error.to_string()))?;
+        if req.gid != req.uid {
+            return Err(AgentError::SecurityViolation(
+                "GID terminal harus sama dengan UID tenant".into(),
+            ));
+        }
+
         let max_sessions = req
             .max_sessions
             .unwrap_or(self.config.max_sessions_per_tenant);

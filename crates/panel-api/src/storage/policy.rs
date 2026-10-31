@@ -300,9 +300,12 @@ pub async fn admit_upload(
         .filter(|_| key.contains('.'))
         .unwrap_or("")
         .to_ascii_lowercase();
+    // Empty S3 directory markers are metadata, not files with an extension.
+    // They still require owner write permission and pass quota admission.
+    let folder_marker = bytes == 0 && key.ends_with('/');
     if !rules.write
         || bytes > rules.max_file_bytes
-        || !rules.extensions.is_empty() && !rules.extensions.contains(&extension)
+        || !folder_marker && !rules.extensions.is_empty() && !rules.extensions.contains(&extension)
     {
         return Err(bad(
             StatusCode::FORBIDDEN,

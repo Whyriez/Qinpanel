@@ -59,6 +59,7 @@ export const Shell: React.FC<ShellProps> = ({
   const pageRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const admin = user?.role === "admin";
+  const navLabel = (id: string) => t(id === 'jobs' && !admin ? 'nav.activity' : id === 'connectivity' && !admin ? 'sites.tabs.connections' : `nav.${id}`, { defaultValue: t('notFound.title') });
   const activeJobs = useActiveJobCounts(admin ? user.id : null);
   const hasActiveJobs = Boolean(activeJobs && activeJobs.total > 0);
   const jobCountDescription = activeJobs
@@ -91,7 +92,6 @@ export const Shell: React.FC<ShellProps> = ({
         { id: "files", icon: FolderTree },
         { id: "storage", icon: HardDrive },
         { id: "terminal", icon: Terminal },
-        ...(!admin ? [{ id: "connectivity", icon: Globe }] : []),
         { id: "analytics", icon: BarChart3 },
       ],
     },
@@ -228,13 +228,13 @@ export const Shell: React.FC<ShellProps> = ({
                   key={id}
                   className={`nav-link ${id === activeNav ? "is-active" : ""} ${id === 'jobs' && hasActiveJobs ? 'has-job-count' : ''}`}
                   aria-current={id === activeNav ? "page" : undefined}
-                  aria-label={t(`nav.${id}`)}
+                  aria-label={navLabel(id)}
                   aria-describedby={id === 'jobs' && hasActiveJobs ? 'sidebar-active-jobs' : undefined}
-                  title={id === 'jobs' && hasActiveJobs ? jobCountDescription : t(`nav.${id}`)}
+                  title={id === 'jobs' && hasActiveJobs ? jobCountDescription : navLabel(id)}
                   onClick={() => navigate(id)}
                 >
                   <Icon size={18} strokeWidth={1.7} />
-                  <span className="nav-label">{t(`nav.${id}`)}</span>
+                  <span className="nav-label">{navLabel(id)}</span>
                   {id === 'jobs' && hasActiveJobs && activeJobs && <>
                     <span className="nav-job-count" aria-hidden="true">{activeJobs.total > 99 ? '99+' : activeJobs.total}</span>
                     <span id="sidebar-active-jobs" className="sr-only">{jobCountDescription}</span>
@@ -314,7 +314,7 @@ export const Shell: React.FC<ShellProps> = ({
           <div className="workspace-breadcrumb">
             <span>Qinpanel</span>
             <span aria-hidden="true">/</span>
-            <strong>{t(`nav.${activeNav}`, { defaultValue: t('notFound.title') })}</strong>
+            <strong>{navLabel(activeNav)}</strong>
           </div>
           <button
             className="workspace-search"
@@ -369,7 +369,7 @@ export const Shell: React.FC<ShellProps> = ({
                 onClick={() => navigate(id)}
               >
                 <Icon size={19} />
-                <span>{t(`nav.${id}`)}</span>
+                <span>{navLabel(id)}</span>
               </RouteLink>
             ))}
           <button

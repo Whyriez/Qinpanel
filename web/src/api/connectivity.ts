@@ -87,7 +87,7 @@ export function parseConnectivity(value: unknown): ConnectivityOverview {
     || v.certificates.some(x => !positive(record(x).id) || !positive(record(x).site_id) || typeof record(x).name !== 'string')) return invalid();
   return value as ConnectivityOverview;
 }
-export const fetchConnectivity = async (page = 1, service: Service | '' = '') => parseConnectivity(await request<unknown>(`/api/v1/connectivity?page=${page}&per_page=25${service ? `&service=${service}` : ''}`));
+export const fetchConnectivity = async (page = 1, service: Service | '' = '', siteId?: number) => parseConnectivity(await request<unknown>(`/api/v1/connectivity?page=${page}&per_page=25${service ? `&service=${service}` : ''}${siteId === undefined ? '' : `&site_id=${siteId}`}`));
 export const fetchEndpoint = async (id: string) => {
   const e = await request<Endpoint>(`/api/v1/connectivity/${encodeURIComponent(id)}`);
   return parseConnectivity({ can_manage: false, endpoints: [{ endpoint: e, evidence: [] }], projects: [], certificates: [], page: 1, per_page: 25, total: 1, total_pages: 1, service_counts: {} }).endpoints[0].endpoint;

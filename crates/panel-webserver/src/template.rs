@@ -56,6 +56,7 @@ server {
     include {{ snippets_dir }}/acme.conf;
     include {{ snippets_dir }}/security-headers.conf;
     include {{ snippets_dir }}/deny-sensitive.conf;
+    disable_symlinks if_not_owner;
 
     {% if custom_headers %}
     # Custom Headers
@@ -163,6 +164,7 @@ server {
     include {{ snippets_dir }}/acme.conf;
     include {{ snippets_dir }}/security-headers.conf;
     include {{ snippets_dir }}/deny-sensitive.conf;
+    disable_symlinks if_not_owner;
 
     # Sensitive application and dependency files protection
     location ~* /(?:\.(?!well-known)|composer\.(?:json|lock)|package(?:\-lock)?\.json|yarn\.lock|\.env|\.user\.ini|web\.config) {
@@ -365,6 +367,7 @@ server {
     include {{ snippets_dir }}/acme.conf;
     include {{ snippets_dir }}/security-headers.conf;
     include {{ snippets_dir }}/deny-sensitive.conf;
+    disable_symlinks if_not_owner;
 
     # Sensitive files and dependency manifests protection
     location ~* /(?:\.(?!well-known)|package(?:\-lock)?\.json|yarn\.lock|pnpm\-lock\.yaml|\.env|\.git) {
@@ -508,6 +511,7 @@ server {
     include {{ snippets_dir }}/acme.conf;
     include {{ snippets_dir }}/security-headers.conf;
     include {{ snippets_dir }}/deny-sensitive.conf;
+    disable_symlinks if_not_owner;
 
     # Sensitive files and python manifests protection
     location ~* /(?:\.(?!well-known)|requirements\.txt|pyproject\.toml|Pipfile|\.venv|__pycache__|\.env|\.git) {
@@ -653,6 +657,7 @@ server {
 
     # Sensitive files protection
     include {{ snippets_dir }}/deny-sensitive.conf;
+    disable_symlinks if_not_owner;
 
     # Hidden files / dotfiles protection (except .well-known)
     location ~ /\.(?!well-known).* {
@@ -714,7 +719,10 @@ server {
 
         {% if proxy_ssl_server_name %}
         proxy_ssl_server_name on;
-        proxy_ssl_name $proxy_host;
+        proxy_ssl_name {{ proxy_ssl_name | default("$proxy_host", true) }};
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 5;
+        proxy_ssl_trusted_certificate {{ proxy_ca_bundle }};
         {% endif %}
 
         # Timeouts and buffering
@@ -974,6 +982,8 @@ pub struct ReverseProxyVhostContext {
     pub custom_headers: Vec<HeaderConfig>,
     pub custom_request_headers: Vec<HeaderConfig>,
     pub proxy_ssl_server_name: bool,
+    #[serde(default)]
+    pub proxy_ssl_name: Option<String>,
     pub allow_external_upstream: bool,
     #[serde(default)]
     pub site_rules_block: Option<String>,
@@ -992,6 +1002,14 @@ impl Default for NginxTemplateRenderer {
 impl NginxTemplateRenderer {
     pub fn new() -> Self {
         let mut env = Environment::new();
+        let ca_bundle = [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .unwrap_or("/etc/ssl/certs/ca-certificates.crt");
+        env.add_global("proxy_ca_bundle", ca_bundle);
         env.add_global(
             "qpanel_default_error_page",
             crate::error_pages::render_default_not_found(),
@@ -1263,6 +1281,17 @@ fn validate_upstream_port(port_opt: Option<u16>) -> Result<(), WebserverError> {
 }
 
 fn validate_ip_upstream(ip: std::net::IpAddr, allow_external: bool) -> Result<(), WebserverError> {
+    let ip = match ip {
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map_or(std::net::IpAddr::V6(ip), std::net::IpAddr::V4),
+        ip => ip,
+    };
+    if !ip.is_loopback() && !panel_core::object_storage::network::is_public_destination(ip) {
+        return Err(WebserverError::SecurityViolation(
+            "Upstream bukan alamat publik yang aman".into(),
+        ));
+    }
     match ip {
         std::net::IpAddr::V4(ipv4) => {
             if ipv4.is_link_local() {
@@ -1441,6 +1470,21 @@ fn validate_nodejs_upstream_url(upstream: &str) -> Result<(), WebserverError> {
 
 /// Strictly validates standalone Reverse Proxy virtual host context inputs.
 pub fn validate_proxy_vhost_inputs(ctx: &ReverseProxyVhostContext) -> Result<(), WebserverError> {
+    for host in [&ctx.proxy_ssl_name, &ctx.custom_host_header]
+        .into_iter()
+        .flatten()
+    {
+        if host.is_empty()
+            || host.len() > 300
+            || !host
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b':' | b'[' | b']'))
+        {
+            return Err(WebserverError::SecurityViolation(
+                "Invalid upstream hostname".into(),
+            ));
+        }
+    }
     if ctx.site_id.trim().is_empty() {
         return Err(WebserverError::SecurityViolation(
             "site_id cannot be empty".to_string(),
@@ -2167,6 +2211,7 @@ mod tests {
         assert!(conf.contains("try_files $uri $uri/ =404;"));
         assert!(conf.contains("include /etc/panel/nginx/snippets/security-headers.conf;"));
         assert!(conf.contains("include /etc/panel/nginx/snippets/deny-sensitive.conf;"));
+        assert!(conf.contains("disable_symlinks if_not_owner;"));
         assert!(!conf.contains("listen 443 ssl http2;"));
     }
 
@@ -2415,6 +2460,7 @@ mod tests {
         assert!(conf.contains("client_max_body_size 64M;"));
         assert!(conf.contains("include /etc/panel/nginx/snippets/security-headers.conf;"));
         assert!(conf.contains("include /etc/panel/nginx/snippets/deny-sensitive.conf;"));
+        assert!(conf.contains("disable_symlinks if_not_owner;"));
         assert!(conf.contains("try_files $uri $uri/ /index.php?$args;"));
         assert!(conf.contains("location ~ \\.php$ {"));
         assert!(conf.contains("try_files $fastcgi_script_name =404;"));
@@ -2865,6 +2911,7 @@ mod tests {
                 value: "SecretKey".to_string(),
             }],
             proxy_ssl_server_name: false,
+            proxy_ssl_name: None,
             allow_external_upstream: false,
             site_rules_block: None,
         };
@@ -2909,6 +2956,7 @@ mod tests {
             custom_headers: vec![],
             custom_request_headers: vec![],
             proxy_ssl_server_name: true,
+            proxy_ssl_name: None,
             allow_external_upstream: true,
             site_rules_block: None,
         };
@@ -2919,6 +2967,9 @@ mod tests {
         assert!(conf.contains("proxy_pass https://api.github.com;"));
         assert!(conf.contains("proxy_set_header Host api.github.com;"));
         assert!(conf.contains("proxy_ssl_server_name on;"));
+        assert!(conf.contains("proxy_ssl_verify on;"));
+        assert!(conf.contains("proxy_ssl_trusted_certificate /etc/"));
+
         assert!(!conf.contains("proxy_set_header Upgrade $http_upgrade;"));
     }
 

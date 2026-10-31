@@ -11,6 +11,39 @@ pub struct SqliteUserRepository {
 }
 
 impl SqliteUserRepository {
+    /// The enrollment endpoint cannot replace an already active factor, even
+    /// with concurrent requests that authenticated before the first enrollment.
+    pub async fn enable_totp_if_disabled(
+        &self,
+        id: i64,
+        session_id: &str,
+        secret: &str,
+        hashes: &[String],
+    ) -> Result<bool, DbError> {
+        let now = chrono::Utc::now().timestamp();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let changed = sqlx::query("UPDATE users SET totp_secret=?,totp_enabled=1,updated_at=? WHERE id=? AND status='active' AND totp_enabled=0 AND EXISTS(SELECT 1 FROM sessions WHERE id=? AND user_id=users.id AND expires_at>?)")
+            .bind(secret).bind(now).bind(id).bind(session_id).bind(now).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM user_recovery_codes WHERE user_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for hash in hashes {
+            sqlx::query("INSERT INTO user_recovery_codes(user_id,code_hash,used_at,created_at) VALUES(?,?,NULL,?)")
+                .bind(id).bind(hash).bind(now).execute(&mut *tx).await?;
+        }
+        sqlx::query("DELETE FROM sessions WHERE user_id=? AND id<>?")
+            .bind(id)
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }

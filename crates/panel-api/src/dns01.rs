@@ -523,7 +523,7 @@ pub async fn discard(
   let (site,user,domains)=load_site(&s.pool,r.site_id).await.map_err(upstream)?;
   let primary=domains.iter().find(|d|d.is_primary).ok_or_else(||upstream("Domain utama hilang."))?;
   if primary.name!=body.hostname {return Err(problem(StatusCode::BAD_REQUEST,"Konfirmasi hostname tidak cocok."));}
-  apply(&s.agent_client,&site,&user,&domains).await.map_err(upstream)?;
+  apply(&s.pool,&s.agent_client,&site,&user,&domains).await.map_err(upstream)?;
   let mut tx=s.pool.begin_with("BEGIN IMMEDIATE").await.map_err(db_error)?;
   sqlx::query("UPDATE certificates SET status='failed',auto_renew=0,privkey_pem='' WHERE id=? AND status='renewing'").bind(r.certificate_id).execute(&mut *tx).await.map_err(db_error)?;
   sqlx::query("UPDATE dns01_orders SET state='failed',private_key_pem='',error='Kandidat dibuang setelah origin dipulihkan.' WHERE id=? AND state='candidate'").bind(&id).execute(&mut *tx).await.map_err(db_error)?;
@@ -618,12 +618,15 @@ async fn process(
     result
 }
 async fn apply(
+    pool: &DbPool,
     agent: &AgentClient,
     site: &Site,
     user: &User,
     domains: &[Domain],
 ) -> Result<(), String> {
-    let config = crate::sites::render_site_vhost(site, user, domains).map_err(|(_, e)| e)?;
+    let config = crate::sites::render_site_vhost(pool, site, user, domains)
+        .await
+        .map_err(|(_, e)| e)?;
     let (username, _) = crate::tenant_context::execution_identity(user).map_err(|(_, e)| e)?;
     let domain = domains
         .iter()
@@ -755,7 +758,7 @@ async fn process_inner(
     let result=async {
   let live:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dns01_lock WHERE token=? AND expires_at>?)").bind(token).bind(now()+60).fetch_one(pool).await.map_err(err)?;
   if !live {return Err("Lease DNS-01 berakhir sebelum deployment.".to_owned());}
-  apply(agent,&candidate,&user,&domains).await?;
+  apply(pool,agent,&candidate,&user,&domains).await?;
   for hostname in &dns_names {agent.dns01(Dns01Request::VerifyOrigin{id:r.id.clone(),hostname:hostname.clone()}).await.map_err(|_|"Listener origin belum menyajikan kandidat TLS yang diminta.".to_owned())?;}
 
   let mut tx=pool.begin_with("BEGIN IMMEDIATE").await.map_err(err)?;
@@ -775,7 +778,7 @@ async fn process_inner(
     if let Err(e) = result {
         // Restore the CURRENT DB configuration if an operator edited the project concurrently.
         let (current, current_user, current_domains) = load_site(pool, old.id).await?;
-        apply(agent,&current,&current_user,&current_domains).await.map_err(|_|format!("{e} Rollback origin belum dapat dipastikan; periksa Nginx sebelum mencoba kembali."))?;
+        apply(pool,agent,&current,&current_user,&current_domains).await.map_err(|_|format!("{e} Rollback origin belum dapat dipastikan; periksa Nginx sebelum mencoba kembali."))?;
         return Err(format!(
             "{e} Konfigurasi sebelumnya telah diterapkan kembali; kandidat dipertahankan."
         ));

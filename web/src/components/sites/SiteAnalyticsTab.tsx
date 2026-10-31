@@ -1,31 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import {
-  RefreshCw,
-  Download,
-  Clock,
-  TrendingUp,
-  TrendingDown,
-  Activity,
-  Layers,
-  Zap,
-} from 'lucide-react';
-import {
-  fetchSiteAnalyticsOverview,
-  fetchSiteAnalyticsTimeseries,
-  fetchSiteAnalyticsBreakdowns,
-  fetchSiteAppMetrics,
-  fetchSiteSlowlog,
-  getSiteAnalyticsExportUrl,
-  fetchSiteDeployments,
-} from '../../api/client';
-import {
-  SiteAnalyticsOverviewResponse,
-  SiteTimeseriesResponse,
-  SiteBreakdownsResponse,
-  SiteAppMetricsResponse,
-  SiteSlowlogResponse,
-  SiteDeployment,
-} from '../../types/api';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { Activity, ArrowDownToLine, Clock3, HardDrive, RefreshCw, Users, SlidersHorizontal, ShieldCheck, Cpu, ListFilter, ChartNoAxesCombined } from 'lucide-react';
+import { fetchSiteAnalyticsOverview, fetchSiteAnalyticsTimeseries, fetchSiteAnalyticsBreakdowns, fetchSiteAppMetrics, fetchSiteSlowlog, getSiteAnalyticsExportUrl, fetchSiteDeployments } from '../../api/client';
+import type { SiteAnalyticsOverviewResponse, SiteTimeseriesResponse, SiteBreakdownsResponse, SiteAppMetricsResponse, SiteSlowlogResponse, SiteDeployment } from '../../types/api';
 import { AnalyticsAreaChart } from '../analytics/AnalyticsAreaChart';
 import { AnalyticsLatencyChart } from '../analytics/AnalyticsLatencyChart';
 import { AnalyticsBarChart } from '../analytics/AnalyticsBarChart';
@@ -34,486 +10,105 @@ import { SlowlogExplorer } from '../analytics/SlowlogExplorer';
 import { AppMetricsCard } from '../analytics/AppMetricsCard';
 import { SiteInsightsCard } from '../analytics/SiteInsightsCard';
 import { SecurityAnalyticsTab } from '../analytics/SecurityAnalyticsTab';
+import { analyticsBytes, AnalyticsEmpty, AnalyticsLoading, AnalyticsMetric, AnalyticsRangePicker, useAnalyticsCopy } from '../analytics/AnalyticsUi';
 
-export interface SiteAnalyticsTabProps {
-  siteId: number;
-  siteDomain: string;
-  siteRuntime?: string;
-}
-
+export interface SiteAnalyticsTabProps { siteId: number; siteDomain: string; siteRuntime?: string }
 type TimePreset = '1h' | '6h' | '24h' | '7d' | '30d' | 'custom';
-
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+type DetailTab = 'traffic' | 'breakdowns' | 'runtime' | 'slowlog' | 'security';
+interface Snapshot {
+  siteId: number; overview: SiteAnalyticsOverviewResponse; timeseries: SiteTimeseriesResponse; breakdowns: SiteBreakdownsResponse;
+  app: SiteAppMetricsResponse | null; slowlog: SiteSlowlogResponse | null; deployments: SiteDeployment[];
+  from: number; to: number; interval: string; receivedAt: number;
 }
+const durations = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+const localDate = (timestamp: number) => { const date = new Date(timestamp * 1000); return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 
-export const SiteAnalyticsTab: React.FC<SiteAnalyticsTabProps> = ({
-  siteId,
-  siteDomain,
-  siteRuntime = 'php',
-}) => {
-  // Filters
-  const [preset, setPreset] = useState<TimePreset>('24h');
-  const [interval, setIntervalOption] = useState<string>('auto');
-  const [compare, setCompare] = useState<boolean>(true);
-  const [autoRefresh, setAutoRefresh] = useState<boolean>(false);
-
-  // Custom date range
-  const [customFrom, setCustomFrom] = useState<string>('');
-  const [customTo, setCustomTo] = useState<string>('');
-
-  // Data States
-  const [overview, setOverview] = useState<SiteAnalyticsOverviewResponse | null>(null);
-  const [timeseries, setTimeseries] = useState<SiteTimeseriesResponse | null>(null);
-  const [breakdowns, setBreakdowns] = useState<SiteBreakdownsResponse | null>(null);
-  const [appMetrics, setAppMetrics] = useState<SiteAppMetricsResponse | null>(null);
-  const [slowlog, setSlowlog] = useState<SiteSlowlogResponse | null>(null);
-  const [deployments, setDeployments] = useState<SiteDeployment[]>([]);
-
-  // UI State
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-  const [activeSubTab, setActiveSubTab] = useState<'traffic' | 'breakdowns' | 'runtime' | 'slowlog' | 'security'>('traffic');
-
-  // Compute timestamps based on preset
+export function SiteAnalyticsTab({ siteId, siteDomain, siteRuntime = 'php' }: SiteAnalyticsTabProps) {
+  const { en, text } = useAnalyticsCopy();
+  const id = useId();
+  const [preset, setPreset] = useState<TimePreset>('24h'), [interval, setIntervalOption] = useState('auto');
+  const [compare, setCompare] = useState(true), [autoRefresh, setAutoRefresh] = useState(false), [filters, setFilters] = useState(false);
+  const [customRange, setCustomRange] = useState(() => { const to = Math.floor(Date.now() / 1000); return { from: to - 86400, to }; });
+  const [customFrom, setCustomFrom] = useState(() => localDate(customRange.from)), [customTo, setCustomTo] = useState(() => localDate(customRange.to));
+  const [data, setData] = useState<Snapshot | null>(null), [loading, setLoading] = useState(true), [refreshing, setRefreshing] = useState(false), [error, setError] = useState('');
+  const [activeTab, setActiveTab] = useState<DetailTab>('traffic');
+  const sequence = useRef(0), pending = useRef(false);
   const getTimeRange = useCallback(() => {
-    const now = Math.floor(Date.now() / 1000);
-    let from = now - 24 * 3600;
-
-    if (preset === '1h') from = now - 3600;
-    else if (preset === '6h') from = now - 6 * 3600;
-    else if (preset === '24h') from = now - 24 * 3600;
-    else if (preset === '7d') from = now - 7 * 24 * 3600;
-    else if (preset === '30d') from = now - 30 * 24 * 3600;
-    else if (preset === 'custom' && customFrom && customTo) {
-      from = Math.floor(new Date(customFrom).getTime() / 1000);
-      const to = Math.floor(new Date(customTo).getTime() / 1000);
-      return { from, to };
-    }
-
-    return { from, to: now };
-  }, [preset, customFrom, customTo]);
-
-  const loadData = useCallback(async (isSilent = false) => {
-    if (!isSilent) setLoading(true);
-    else setRefreshing(true);
-    setError(null);
-
+    if (preset === 'custom') return customRange;
+    const to = Math.floor(Date.now() / 1000); return { from: to - durations[preset], to };
+  }, [preset, customRange]);
+  const loadData = useCallback(async (silent = false) => {
+    if (silent && pending.current) return;
+    const revision = ++sequence.current; pending.current = true;
+    if (silent) setRefreshing(true); else { setLoading(true); setData(null); }
+    setError('');
     const { from, to } = getTimeRange();
-
     try {
-      const [ovRes, tsRes, bdRes, apRes, slRes] = await Promise.all([
-        fetchSiteAnalyticsOverview(siteId, { from, to, interval, compare }),
-        fetchSiteAnalyticsTimeseries(siteId, { from, to, interval }),
-        fetchSiteAnalyticsBreakdowns(siteId, { from, to, limit: 15 }),
-        fetchSiteAppMetrics(siteId, { from, to }).catch(() => null),
-        siteRuntime === 'php' ? fetchSiteSlowlog(siteId, { from, to }).catch(() => null) : Promise.resolve(null),
+      const [overview, timeseries, breakdowns, app, slowlog, deployments] = await Promise.all([
+        fetchSiteAnalyticsOverview(siteId, { from, to, interval, compare }), fetchSiteAnalyticsTimeseries(siteId, { from, to, interval }), fetchSiteAnalyticsBreakdowns(siteId, { from, to, limit: 15 }),
+        fetchSiteAppMetrics(siteId, { from, to }).catch(() => null), siteRuntime === 'php' ? fetchSiteSlowlog(siteId, { from, to }).catch(() => null) : Promise.resolve(null), fetchSiteDeployments(siteId).catch(() => []),
       ]);
-
-      setOverview(ovRes);
-      setTimeseries(tsRes);
-      setBreakdowns(bdRes);
-      setAppMetrics(apRes);
-      setSlowlog(slRes);
-
-      // Fetch deployments for deploy markers
-      try {
-        const depRes = await fetchSiteDeployments(siteId);
-        setDeployments(Array.isArray(depRes) ? depRes : []);
-      } catch {
-        // ignore deployment fetch error
-      }
-    } catch (err: unknown) {
-      const e = err as Error;
-      setError(e.message || 'Gagal memuat data analitik situs');
+      if (revision === sequence.current) setData({ siteId, overview, timeseries, breakdowns, app, slowlog, deployments: Array.isArray(deployments) ? deployments : [], from, to, interval, receivedAt: Date.now() });
+    } catch (cause) {
+      if (revision === sequence.current) setError(cause instanceof Error ? cause.message : en ? 'Could not load analytics.' : 'Analitik belum dapat dimuat.');
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (revision === sequence.current) { pending.current = false; setLoading(false); setRefreshing(false); }
     }
-  }, [siteId, siteRuntime, getTimeRange, interval, compare]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  // Auto refresh interval
+  }, [siteId, siteRuntime, getTimeRange, interval, compare, en]);
+  useEffect(() => { void loadData(); return () => { sequence.current++; pending.current = false; }; }, [loadData]);
   useEffect(() => {
     if (!autoRefresh) return;
-    const intervalTimer = setInterval(() => {
-      loadData(true);
-    }, 30000);
-    return () => clearInterval(intervalTimer);
+    const timer = window.setInterval(() => { if (!document.hidden) void loadData(true); }, 30000);
+    return () => window.clearInterval(timer);
   }, [autoRefresh, loadData]);
-
-  const { from, to } = getTimeRange();
-  const exportUrl = getSiteAnalyticsExportUrl(siteId, { from, to, interval });
-
-  const cur = overview?.current;
-  const comp = overview?.comparison;
-
-  return (
-    <div className="space-y-6">
-      {/* Control Bar: Range Preset, Interval, Compare, Export, Refresh */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-4 bg-[var(--surface)] border border-[var(--line)] rounded-xl shadow-sm">
-        {/* Presets */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {(['1h', '6h', '24h', '7d', '30d', 'custom'] as TimePreset[]).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => setPreset(p)}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
-                preset === p
-                  ? 'bg-[var(--primary)] text-white shadow-xs'
-                  : 'bg-[var(--bg)] border border-[var(--line)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
-              }`}
-            >
-              {p === '1h' && '1 Jam'}
-              {p === '6h' && '6 Jam'}
-              {p === '24h' && '24 Jam'}
-              {p === '7d' && '7 Hari'}
-              {p === '30d' && '30 Hari'}
-              {p === 'custom' && 'Kustom'}
-            </button>
-          ))}
-
-          {/* Custom Date Inputs */}
-          {preset === 'custom' && (
-            <div className="flex items-center gap-1.5 ml-2">
-              <input
-                type="datetime-local"
-                value={customFrom}
-                onChange={(e) => setCustomFrom(e.target.value)}
-                className="px-2 py-1 text-xs bg-[var(--bg)] border border-[var(--line)] rounded text-[var(--ink)]"
-                title="Waktu Mulai"
-              />
-              <span className="text-xs text-[var(--ink-muted)]">-</span>
-              <input
-                type="datetime-local"
-                value={customTo}
-                onChange={(e) => setCustomTo(e.target.value)}
-                className="px-2 py-1 text-xs bg-[var(--bg)] border border-[var(--line)] rounded text-[var(--ink)]"
-                title="Waktu Selesai"
-              />
-            </div>
-          )}
-
-          {/* Interval */}
-          <select
-            value={interval}
-            onChange={(e) => setIntervalOption(e.target.value)}
-            className="ml-2 px-2.5 py-1.5 text-xs bg-[var(--bg)] border border-[var(--line)] rounded-lg text-[var(--ink)] focus:outline-none"
-            title="Interval agregasi waktu"
-          >
-            <option value="auto">Interval: Otomatis</option>
-            <option value="1m">Interval: 1 Menit</option>
-            <option value="1h">Interval: 1 Jam</option>
-            <option value="1d">Interval: 1 Hari</option>
-          </select>
-        </div>
-
-        {/* Action Controls */}
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Compare toggle */}
-          <label className="flex items-center gap-2 text-xs text-[var(--ink-muted)] cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={compare}
-              onChange={(e) => setCompare(e.target.checked)}
-              className="rounded border-[var(--line)] text-[var(--primary)] focus:ring-[var(--primary)]"
-            />
-            <span>Bandingkan Periode Lalu</span>
-          </label>
-
-          {/* Auto refresh toggle */}
-          <label className="flex items-center gap-2 text-xs text-[var(--ink-muted)] cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="rounded border-[var(--line)] text-[var(--primary)] focus:ring-[var(--primary)]"
-            />
-            <span>Auto-Refresh (30s)</span>
-          </label>
-
-          {/* Export CSV */}
-          <a
-            href={exportUrl}
-            download={`analytics-${siteDomain}-${preset}.csv`}
-            className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-[var(--line)] bg-[var(--bg)] text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors flex items-center gap-1.5"
-            title="Ekspor CSV"
-          >
-            <Download className="w-3.5 h-3.5 text-[var(--ink-muted)]" />
-            <span>Ekspor CSV</span>
-          </a>
-
-          {/* Manual Refresh */}
-          <button
-            type="button"
-            onClick={() => loadData(false)}
-            disabled={loading || refreshing}
-            className="p-1.5 rounded-lg border border-[var(--line)] bg-[var(--bg)] text-[var(--ink-muted)] hover:text-[var(--ink)] hover:bg-[var(--surface-hover)] transition-colors"
-            title="Perbarui Data"
-          >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin text-[var(--primary)]' : ''}`} />
-          </button>
-        </div>
-      </div>
-
-      {/* Error Banner */}
-      {error && (
-        <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-500 flex items-center justify-between">
-          <span>{error}</span>
-          <button
-            type="button"
-            onClick={() => loadData(false)}
-            className="font-semibold underline hover:no-underline"
-          >
-            Coba lagi
-          </button>
-        </div>
-      )}
-
-      {/* Loading Skeleton */}
-      {loading && !overview ? (
-        <div className="space-y-4 animate-pulse">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="h-24 bg-[var(--surface)] border border-[var(--line)] rounded-xl" />
-            ))}
-          </div>
-          <div className="h-64 bg-[var(--surface)] border border-[var(--line)] rounded-xl" />
-        </div>
-      ) : (
-        <>
-          {/* Anomaly & Insight Engine (Phase 9 - P9-T7) */}
-          <SiteInsightsCard siteId={siteId} siteDomain={siteDomain} />
-
-          {/* KPI Summary Cards */}
-          {cur && (
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* Total Requests */}
-              <div className="p-4 bg-[var(--surface)] border border-[var(--line)] rounded-xl shadow-xs">
-                <div className="flex items-center justify-between text-xs text-[var(--ink-muted)] mb-1">
-                  <span>Total Permintaan</span>
-                  <Activity className="w-4 h-4 text-blue-500" />
-                </div>
-                <div className="text-2xl font-bold font-mono text-[var(--ink)]">
-                  {cur.total_requests.toLocaleString()}
-                </div>
-                {comp && (
-                  <div className="flex items-center gap-1.5 mt-2 text-xs">
-                    {comp.requests_change_percent >= 0 ? (
-                      <span className="flex items-center gap-0.5 text-emerald-500 font-medium">
-                        <TrendingUp className="w-3.5 h-3.5" /> +{comp.requests_change_percent.toFixed(1)}%
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-0.5 text-rose-500 font-medium">
-                        <TrendingDown className="w-3.5 h-3.5" /> {comp.requests_change_percent.toFixed(1)}%
-                      </span>
-                    )}
-                    <span className="text-[var(--ink-muted)]">vs periode lalu</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Total Bandwidth */}
-              <div className="p-4 bg-[var(--surface)] border border-[var(--line)] rounded-xl shadow-xs">
-                <div className="flex items-center justify-between text-xs text-[var(--ink-muted)] mb-1">
-                  <span>Bandwidth (Egress)</span>
-                  <Zap className="w-4 h-4 text-amber-500" />
-                </div>
-                <div className="text-2xl font-bold font-mono text-[var(--ink)]">
-                  {formatBytes(cur.total_bytes)}
-                </div>
-                {comp && (
-                  <div className="flex items-center gap-1.5 mt-2 text-xs">
-                    {comp.bytes_change_percent >= 0 ? (
-                      <span className="flex items-center gap-0.5 text-emerald-500 font-medium">
-                        <TrendingUp className="w-3.5 h-3.5" /> +{comp.bytes_change_percent.toFixed(1)}%
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-0.5 text-rose-500 font-medium">
-                        <TrendingDown className="w-3.5 h-3.5" /> {comp.bytes_change_percent.toFixed(1)}%
-                      </span>
-                    )}
-                    <span className="text-[var(--ink-muted)]">vs periode lalu</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Unique Visitors */}
-              <div className="p-4 bg-[var(--surface)] border border-[var(--line)] rounded-xl shadow-xs">
-                <div className="flex items-center justify-between text-xs text-[var(--ink-muted)] mb-1">
-                  <span>Pengunjung Unik</span>
-                  <Layers className="w-4 h-4 text-purple-500" />
-                </div>
-                <div className="text-2xl font-bold font-mono text-[var(--ink)]">
-                  {cur.unique_visitors.toLocaleString()}
-                </div>
-                <div className="flex items-center gap-2 mt-2 text-xs text-[var(--ink-muted)]">
-                  <span>Cache Hit:</span>
-                  <span className="font-semibold text-emerald-500 font-mono">
-                    {Math.round(cur.cache_hit_ratio * 100)}%
-                  </span>
-                </div>
-              </div>
-
-              {/* Latency & Error Rate */}
-              <div className="p-4 bg-[var(--surface)] border border-[var(--line)] rounded-xl shadow-xs">
-                <div className="flex items-center justify-between text-xs text-[var(--ink-muted)] mb-1">
-                  <span>Latensi & Error Rate</span>
-                  <Clock className="w-4 h-4 text-emerald-500" />
-                </div>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-2xl font-bold font-mono text-[var(--ink)]">
-                    {cur.latency_p50_ms} ms
-                  </span>
-                  <span className="text-xs text-[var(--ink-muted)] font-mono">
-                    (p95: {cur.latency_p95_ms}ms)
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 mt-2 text-xs">
-                  <span className="text-[var(--ink-muted)]">Tingkat Error:</span>
-                  <span
-                    className={`font-semibold font-mono ${
-                      cur.error_rate_percent > 1 ? 'text-rose-500' : 'text-emerald-500'
-                    }`}
-                  >
-                    {cur.error_rate_percent.toFixed(2)}%
-                  </span>
-                  <span className="text-[10px] text-[var(--ink-muted)]">
-                    ({cur.status_4xx + cur.status_5xx} err)
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Sub Navigation: Traffic & Latency, Breakdown, App Runtime, Slowlog */}
-          <div className="flex items-center gap-2 border-b border-[var(--line)] text-xs font-medium">
-            <button
-              type="button"
-              onClick={() => setActiveSubTab('traffic')}
-              className={`px-4 py-2 border-b-2 transition-colors ${
-                activeSubTab === 'traffic'
-                  ? 'border-[var(--primary)] text-[var(--primary)] font-semibold'
-                  : 'border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]'
-              }`}
-            >
-              Grafik Lalu Lintas & Latensi
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSubTab('breakdowns')}
-              className={`px-4 py-2 border-b-2 transition-colors ${
-                activeSubTab === 'breakdowns'
-                  ? 'border-[var(--primary)] text-[var(--primary)] font-semibold'
-                  : 'border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]'
-              }`}
-            >
-              Rincian Dimensi (8 Dimensi)
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSubTab('runtime')}
-              className={`px-4 py-2 border-b-2 transition-colors ${
-                activeSubTab === 'runtime'
-                  ? 'border-[var(--primary)] text-[var(--primary)] font-semibold'
-                  : 'border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]'
-              }`}
-            >
-              Metrik Runtime & Cgroup
-            </button>
-            {siteRuntime === 'php' && (
-              <button
-                type="button"
-                onClick={() => setActiveSubTab('slowlog')}
-                className={`px-4 py-2 border-b-2 transition-colors ${
-                  activeSubTab === 'slowlog'
-                    ? 'border-[var(--primary)] text-[var(--primary)] font-semibold'
-                    : 'border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                }`}
-              >
-                PHP Slowlog Explorer
-                {slowlog && slowlog.events.length > 0 && (
-                  <span className="ml-1.5 px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-500 text-[10px]">
-                    {slowlog.events.length}
-                  </span>
-                )}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setActiveSubTab('security')}
-              className={`px-4 py-2 border-b-2 transition-colors ${
-                activeSubTab === 'security'
-                  ? 'border-[var(--primary)] text-[var(--primary)] font-semibold'
-                  : 'border-transparent text-[var(--ink-muted)] hover:text-[var(--ink)]'
-              }`}
-            >
-              Keamanan & Proteksi IP
-            </button>
-          </div>
-
-          {/* Sub Tab: Traffic & Latency */}
-          {activeSubTab === 'traffic' && timeseries && (
-            <div className="space-y-6">
-              {/* Traffic Area Chart with Deploy Markers */}
-              <AnalyticsAreaChart
-                points={timeseries.points}
-                deployments={deployments}
-                height={260}
-                metric="requests"
-                title="Lalu Lintas Permintaan (HTTP Requests) & Penanda Rilis Deploy"
-              />
-
-              {/* 2 Grid: Latency Chart & Errors Bar Chart */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <AnalyticsLatencyChart
-                  points={timeseries.points}
-                  height={220}
-                  title="Latensi Respons (p50 / p95 / p99)"
-                />
-                <AnalyticsBarChart
-                  points={timeseries.points}
-                  height={220}
-                  title="Distribusi Kode Error (4xx & 5xx)"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Sub Tab: Breakdowns */}
-          {activeSubTab === 'breakdowns' && (
-            <BreakdownTable breakdowns={breakdowns} />
-          )}
-
-          {/* Sub Tab: Runtime & Cgroup */}
-          {activeSubTab === 'runtime' && (
-            <AppMetricsCard metrics={appMetrics} />
-          )}
-
-          {/* Sub Tab: Slowlog */}
-          {activeSubTab === 'slowlog' && (
-            <SlowlogExplorer events={slowlog?.events || []} />
-          )}
-
-          {/* Sub Tab: Security Analytics */}
-          {activeSubTab === 'security' && (
-            <SecurityAnalyticsTab
-              siteId={siteId}
-              siteDomain={siteDomain}
-              timeRange={getTimeRange()}
-            />
-          )}
-        </>
-      )}
+  const snapshot = data?.siteId === siteId ? data : null;
+  const cur = snapshot?.overview.current, comparison = compare ? snapshot?.overview.comparison : null;
+  const fromDraft = Math.floor(new Date(customFrom).getTime() / 1000), toDraft = Math.floor(new Date(customTo).getTime() / 1000);
+  const invalidCustom = !Number.isFinite(fromDraft) || !Number.isFinite(toDraft) || fromDraft >= toDraft;
+  const tabs = [
+    { value: 'traffic' as const, label: text('Trafik', 'Traffic'), Icon: ChartNoAxesCombined },
+    { value: 'breakdowns' as const, label: text('Rincian', 'Breakdowns'), Icon: ListFilter },
+    { value: 'runtime' as const, label: 'Runtime', Icon: Cpu },
+    ...(siteRuntime === 'php' ? [{ value: 'slowlog' as const, label: 'Slowlog', Icon: Clock3 }] : []),
+    { value: 'security' as const, label: text('Keamanan', 'Security'), Icon: ShieldCheck },
+  ];
+  return <section className="analytics-site analytics-workspace" aria-label={text('Analitik situs', 'Site analytics')}>
+    <div className="analytics-toolbar">
+      <AnalyticsRangePicker value={preset} onChange={setPreset} label={text('Periode analitik', 'Analytics period')} options={[
+        { value: '1h', label: text('1 jam', '1 hour') }, { value: '6h', label: text('6 jam', '6 hours') }, { value: '24h', label: text('24 jam', '24 hours') }, { value: '7d', label: text('7 hari', '7 days') }, { value: '30d', label: text('30 hari', '30 days') }, { value: 'custom', label: text('Kustom', 'Custom') },
+      ]} />
+      <div className="analytics-actions"><button type="button" aria-expanded={filters} onClick={() => setFilters(value => !value)}><SlidersHorizontal size={15} aria-hidden="true" />{text('Opsi tampilan', 'Display options')}</button><a href={snapshot ? getSiteAnalyticsExportUrl(siteId, { from: snapshot.from, to: snapshot.to, interval: snapshot.interval }) : undefined} aria-disabled={!snapshot} download={`analytics-${siteDomain}-${preset}.csv`}><ArrowDownToLine size={15} aria-hidden="true" />CSV</a><button type="button" disabled={loading || refreshing} onClick={() => void loadData()} aria-label={text('Muat ulang analitik', 'Refresh analytics')}><RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" /></button></div>
     </div>
-  );
-};
+    {preset === 'custom' && <form className="analytics-custom-range" onSubmit={event => { event.preventDefault(); if (!invalidCustom) setCustomRange({ from: fromDraft, to: toDraft }); }}><label>{text('Mulai', 'From')}<input type="datetime-local" required value={customFrom} onChange={event => setCustomFrom(event.target.value)} /></label><label>{text('Sampai', 'To')}<input type="datetime-local" required value={customTo} onChange={event => setCustomTo(event.target.value)} /></label><button type="submit" disabled={invalidCustom}>{text('Terapkan periode', 'Apply period')}</button>{invalidCustom && <p role="alert">{text('Waktu selesai harus setelah waktu mulai.', 'The end time must be after the start time.')}</p>}</form>}
+    {filters && <div className="analytics-options"><label>{text('Interval data', 'Data interval')}<select aria-label={text('Interval data', 'Data interval')} value={interval} onChange={event => setIntervalOption(event.target.value)}><option value="auto">{text('Otomatis', 'Automatic')}</option><option value="1m">{text('1 menit', '1 minute')}</option><option value="1h">{text('1 jam', '1 hour')}</option><option value="1d">{text('1 hari', '1 day')}</option></select></label><label className="analytics-toggle"><input type="checkbox" checked={compare} onChange={event => setCompare(event.target.checked)} />{text('Bandingkan periode lalu', 'Compare previous period')}</label><label className="analytics-toggle"><input type="checkbox" checked={autoRefresh} onChange={event => setAutoRefresh(event.target.checked)} />{text('Perbarui otomatis setiap 30 detik', 'Refresh every 30 seconds')}</label></div>}
+    <div className="analytics-period-caption"><span>{snapshot ? `${new Date(snapshot.from * 1000).toLocaleString(en ? 'en-GB' : 'id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} - ${new Date(snapshot.to * 1000).toLocaleString(en ? 'en-GB' : 'id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : text('Ringkasan periode terpilih', 'Selected period overview')}</span><span role="status">{refreshing ? text('Memperbarui...', 'Updating...') : snapshot ? `${text('Diperbarui', 'Updated')} ${new Date(snapshot.receivedAt).toLocaleTimeString(en ? 'en-GB' : 'id-ID', { hour: '2-digit', minute: '2-digit' })}` : ''}</span></div>
+    {error && <div className="analytics-error" role="alert"><span>{error}{snapshot && <small>{text('Data terakhir ditampilkan. Pembaruan belum berhasil.', 'Showing the last received data. Refresh did not succeed.')}</small>}</span><button type="button" onClick={() => void loadData()}>{text('Coba lagi', 'Retry')}</button></div>}
+    {loading ? <AnalyticsLoading /> : snapshot && cur ? <>
+      <div className="analytics-metric-grid">
+        <AnalyticsMetric label={text('Permintaan', 'Requests')} value={cur.total_requests.toLocaleString()} change={comparison?.requests_change_percent} icon={<Activity size={16} />} />
+        <AnalyticsMetric label={text('Pengunjung unik', 'Unique visitors')} value={cur.unique_visitors.toLocaleString()} change={comparison?.visitors_change_percent} icon={<Users size={16} />} />
+        <AnalyticsMetric label={text('Transfer data', 'Data transfer')} value={analyticsBytes(cur.total_bytes)} change={comparison?.bytes_change_percent} icon={<HardDrive size={16} />} />
+        <AnalyticsMetric label={text('Waktu respons p95', 'Response time p95')} value={<>{cur.latency_p95_ms.toLocaleString()}<small>ms</small></>} hint={`p50: ${cur.latency_p50_ms} ms / p99: ${cur.latency_p99_ms} ms`} icon={<Clock3 size={16} />} />
+      </div>
+      <div className="analytics-health-strip"><span>{text('Tingkat error', 'Error rate')}<strong className={cur.error_rate_percent > 1 ? 'analytics-danger' : ''}>{cur.error_rate_percent.toFixed(2)}%</strong></span><span>Cache hit<strong>{Math.round(cur.cache_hit_ratio * 100)}%</strong></span><span>{text('Interval', 'Interval')}<strong>{snapshot.overview.interval_used}</strong></span></div>
+      <div className="analytics-detail-tabs" role="tablist" aria-label={text('Rincian analitik', 'Analytics details')} onKeyDown={event => {
+        const elements = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+        const index = elements.indexOf(document.activeElement as HTMLButtonElement);
+        const next = event.key === 'ArrowRight' ? (index + 1) % elements.length : event.key === 'ArrowLeft' ? (index - 1 + elements.length) % elements.length : event.key === 'Home' ? 0 : event.key === 'End' ? elements.length - 1 : -1;
+        if (next >= 0) { event.preventDefault(); elements[next].focus(); elements[next].click(); }
+      }}>{tabs.map(({ value, label, Icon }) => <button type="button" key={value} id={`${id}-${value}`} role="tab" aria-controls={`${id}-panel`} aria-selected={activeTab === value} tabIndex={activeTab === value ? 0 : -1} onClick={() => setActiveTab(value)}><Icon size={16} aria-hidden="true" />{label}</button>)}</div>
+      <div id={`${id}-panel`} role="tabpanel" aria-labelledby={`${id}-${activeTab}`} className="analytics-tab-content">
+        {activeTab === 'traffic' && <>
+          {!cur.total_requests && <div className="analytics-info">{text('Belum ada permintaan pada periode ini. Ubah periode untuk menelusuri trafik sebelumnya.', 'No requests in this period. Change the period to explore earlier traffic.')}</div>}
+          <AnalyticsAreaChart points={snapshot.timeseries.points} deployments={snapshot.deployments} />
+          <div className="analytics-chart-grid"><AnalyticsLatencyChart points={snapshot.timeseries.points} /><AnalyticsBarChart points={snapshot.timeseries.points} /></div>
+          <SiteInsightsCard key={siteId} siteId={siteId} siteDomain={siteDomain} className="analytics-insights" />
+        </>}
+        {activeTab === 'breakdowns' && <BreakdownTable breakdowns={snapshot.breakdowns} className="analytics-breakdowns" />}
+        {activeTab === 'runtime' && (snapshot.app ? <AppMetricsCard metrics={snapshot.app} className="analytics-runtime" /> : <AnalyticsEmpty title={text('Metrik runtime belum tersedia', 'Runtime metrics unavailable')} description={text('Data runtime untuk situs ini belum dapat dimuat. Coba muat ulang analitik.', 'Runtime data could not be loaded for this site. Try refreshing analytics.')} />)}
+        {activeTab === 'slowlog' && (snapshot.slowlog ? <SlowlogExplorer events={snapshot.slowlog.events} className="analytics-slowlog" /> : <AnalyticsEmpty title={text('Slowlog belum tersedia', 'Slowlog unavailable')} description={text('Sampel slowlog belum dapat dimuat untuk periode ini.', 'Slowlog samples could not be loaded for this period.')} />)}
+        {activeTab === 'security' && <SecurityAnalyticsTab siteId={siteId} siteDomain={siteDomain} timeRange={{ from: snapshot.from, to: snapshot.to }} />}
+      </div>
+    </> : !error && <AnalyticsEmpty title={text('Belum ada data analitik', 'No analytics data yet')} />}
+  </section>;
+}

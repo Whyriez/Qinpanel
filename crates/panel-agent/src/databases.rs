@@ -14,7 +14,46 @@ use panel_proto::{
     DatabaseSizeCheckRequest, DatabaseSizeCheckResponse, DatabaseUpdateRemoteAccessRequest,
     DatabaseUpdateRemoteAccessResponse,
 };
-use std::path::Path;
+
+fn sql_identifier(value: &str) -> Result<(), AgentError> {
+    if value.trim() != value {
+        return Err(AgentError::InvalidInput(
+            "Identifier database tidak valid".into(),
+        ));
+    }
+    panel_core::database::validate_database_encoding(value)
+        .map_err(|error| AgentError::InvalidInput(error.to_string()))
+}
+
+fn administrator_sql(
+    runner: &dyn SystemRunner,
+    engine: DatabaseEngine,
+    sql: &str,
+) -> Result<(), AgentError> {
+    let result = match engine {
+        DatabaseEngine::MariaDb => {
+            runner.run_command_with_input("mariadb", &["--batch"], sql.as_bytes())
+        }
+        DatabaseEngine::PostgreSql => runner.run_command_with_input(
+            "runuser",
+            &[
+                "--user",
+                "postgres",
+                "--",
+                "psql",
+                "--no-psqlrc",
+                "--set",
+                "ON_ERROR_STOP=1",
+                "--dbname",
+                "postgres",
+            ],
+            sql.as_bytes(),
+        ),
+    };
+    result.map(|_| ()).map_err(|_| {
+        AgentError::Internal("Operasi administrasi database gagal; periksa layanan database".into())
+    })
+}
 
 /// Inspects current installation and running status of database engines.
 pub fn get_database_server_status(
@@ -203,6 +242,10 @@ pub fn create_database(
     let engine =
         DatabaseEngine::parse(&req.engine).map_err(|e| AgentError::InvalidInput(e.to_string()))?;
 
+    for value in [&req.name, &req.db_user, &req.character_set, &req.collation] {
+        sql_identifier(value)?;
+    }
+
     // Basic domain parameter validations
     validate_database_password(&req.password)
         .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
@@ -231,30 +274,35 @@ pub fn create_database(
             );
             let grant_sql = format!(
                 "GRANT ALL PRIVILEGES ON `{}`.* TO '{}'@'{}'; FLUSH PRIVILEGES;",
-                req.name, req.db_user, host_spec
+                req.name.replace('_', "\\_"),
+                req.db_user,
+                host_spec
             );
 
             let combined_sql = format!("{create_db_sql} {create_user_sql} {grant_sql}");
-            runner.run_command("mariadb", &["-e", &combined_sql])?;
+            administrator_sql(runner, engine, &combined_sql)?;
         }
         DatabaseEngine::PostgreSql => {
+            // A caller-selected password may contain '$$'. A fresh delimiter
+            // prevents it from terminating the surrounding procedural block.
+            let delimiter = format!("$qp_{}$", uuid::Uuid::new_v4().simple());
             let create_user_sql = format!(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{}') THEN CREATE USER \"{}\" WITH PASSWORD '{}'; ELSE ALTER USER \"{}\" WITH PASSWORD '{}'; END IF; END $$;",
+                "DO {delimiter} BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{}') THEN CREATE USER \"{}\" WITH PASSWORD '{}'; ELSE ALTER USER \"{}\" WITH PASSWORD '{}'; END IF; END {delimiter};",
                 req.db_user, req.db_user, req.password, req.db_user, req.password
             );
-            runner.run_command("psql", &["-U", "postgres", "-c", &create_user_sql])?;
+            administrator_sql(runner, engine, &create_user_sql)?;
 
             let create_db_sql = format!(
-                "SELECT 'CREATE DATABASE \"{}\" OWNER \"{}\" ENCODING ''{}''' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{}')\\gexec",
+                "SELECT 'CREATE DATABASE \"{}\" OWNER \"{}\" ENCODING ''{}''' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{}')\n\\gexec\n",
                 req.name, req.db_user, req.character_set, req.name
             );
-            runner.run_command("psql", &["-U", "postgres", "-c", &create_db_sql])?;
+            administrator_sql(runner, engine, &create_db_sql)?;
 
             let grant_sql = format!(
                 "GRANT ALL PRIVILEGES ON DATABASE \"{}\" TO \"{}\";",
                 req.name, req.db_user
             );
-            runner.run_command("psql", &["-U", "postgres", "-c", &grant_sql])?;
+            administrator_sql(runner, engine, &grant_sql)?;
         }
     }
 
@@ -278,22 +326,24 @@ pub fn delete_database(
     let engine =
         DatabaseEngine::parse(&req.engine).map_err(|e| AgentError::InvalidInput(e.to_string()))?;
 
+    sql_identifier(&req.name)?;
+    sql_identifier(&req.db_user)?;
     match engine {
         DatabaseEngine::MariaDb => {
             let sql = format!(
                 "DROP DATABASE IF EXISTS `{}`; DROP USER IF EXISTS '{}'@'localhost'; DROP USER IF EXISTS '{}'@'%'; FLUSH PRIVILEGES;",
                 req.name, req.db_user, req.db_user
             );
-            runner.run_command("mariadb", &["-e", &sql])?;
+            administrator_sql(runner, engine, &sql)?;
             crate::database_web::remove_account(runner, engine, &req.name)?;
         }
         DatabaseEngine::PostgreSql => {
             let drop_db_sql = format!("DROP DATABASE IF EXISTS \"{}\";", req.name);
-            runner.run_command("psql", &["-U", "postgres", "-c", &drop_db_sql])?;
+            administrator_sql(runner, engine, &drop_db_sql)?;
             crate::database_web::remove_account(runner, engine, &req.name)?;
 
             let drop_user_sql = format!("DROP USER IF EXISTS \"{}\";", req.db_user);
-            let _ = runner.run_command("psql", &["-U", "postgres", "-c", &drop_user_sql]);
+            let _ = administrator_sql(runner, engine, &drop_user_sql);
         }
     }
 
@@ -316,6 +366,10 @@ pub fn rotate_database_password(
     validate_database_password(&req.new_password)
         .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
 
+    sql_identifier(&req.name)?;
+    sql_identifier(&req.db_user)?;
+    validate_allowed_hosts(&req.allowed_hosts, true)
+        .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
     match engine {
         DatabaseEngine::MariaDb => {
             let host_spec = if req.allowed_hosts.is_empty() {
@@ -332,14 +386,14 @@ pub fn rotate_database_password(
                 "ALTER USER '{}'@'{}' IDENTIFIED BY '{}'; FLUSH PRIVILEGES;",
                 req.db_user, host_spec, req.new_password
             );
-            runner.run_command("mariadb", &["-e", &sql])?;
+            administrator_sql(runner, engine, &sql)?;
         }
         DatabaseEngine::PostgreSql => {
             let sql = format!(
                 "ALTER USER \"{}\" WITH PASSWORD '{}';",
                 req.db_user, req.new_password
             );
-            runner.run_command("psql", &["-U", "postgres", "-c", &sql])?;
+            administrator_sql(runner, engine, &sql)?;
         }
     }
 
@@ -363,6 +417,8 @@ pub fn update_remote_access(
     validate_allowed_hosts(&req.allowed_hosts, req.remote_access)
         .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
 
+    sql_identifier(&req.name)?;
+    sql_identifier(&req.db_user)?;
     if engine == DatabaseEngine::MariaDb {
         if req.remote_access {
             let host_spec =
@@ -373,15 +429,18 @@ pub fn update_remote_access(
                 };
             let sql = format!(
                 "GRANT ALL PRIVILEGES ON `{}`.* TO '{}'@'{}'; FLUSH PRIVILEGES;",
-                req.name, req.db_user, host_spec
+                req.name.replace('_', "\\_"),
+                req.db_user,
+                host_spec
             );
-            runner.run_command("mariadb", &["-e", &sql])?;
+            administrator_sql(runner, engine, &sql)?;
         } else {
             let sql = format!(
                 "REVOKE ALL PRIVILEGES ON `{}`.* FROM '{}'@'%'; FLUSH PRIVILEGES;",
-                req.name, req.db_user
+                req.name.replace('_', "\\_"),
+                req.db_user
             );
-            let _ = runner.run_command("mariadb", &["-e", &sql]);
+            let _ = administrator_sql(runner, engine, &sql);
         }
     }
 
@@ -405,35 +464,23 @@ pub fn export_database(
     validate_dump_path(&req.export_file_path, &req.tenant_username)
         .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
 
-    let dump_path = Path::new(&req.export_file_path);
-    if let Some(parent) = dump_path.parent() {
-        runner.create_dir_all(parent, 0o750, req.tenant_uid, req.tenant_uid)?;
-    }
-
-    match engine {
-        DatabaseEngine::MariaDb => {
-            let result_flag = format!("--result-file={}", req.export_file_path);
-            runner.run_command(
-                "mariadb-dump",
-                &["--single-transaction", "--quick", &result_flag, &req.name],
-            )?;
-        }
-        DatabaseEngine::PostgreSql => {
-            runner.run_command(
-                "pg_dump",
-                &["-U", "postgres", "-f", &req.export_file_path, &req.name],
-            )?;
-        }
-    }
-
-    // Set secure permission 0600 and ownership to tenant
-    let _ = runner.set_permissions(dump_path, 0o600);
-    let _ = runner.set_ownership(dump_path, req.tenant_uid, req.tenant_uid);
-
-    let size_bytes = match runner.read_file(dump_path) {
-        Ok(bytes) => bytes.len() as u64,
-        Err(_) => 0,
-    };
+    crate::database_transfer::transfer(
+        runner,
+        &crate::database_transfer::DatabaseFileTransfer {
+            engine: &req.engine,
+            name: &req.name,
+            db_user: req.db_user.as_deref().ok_or_else(|| {
+                AgentError::InvalidInput("Pengguna database wajib tersedia".into())
+            })?,
+            tenant_username: &req.tenant_username,
+            tenant_uid: req.tenant_uid,
+            path: &req.export_file_path,
+            import: false,
+        },
+    )?;
+    let size_bytes = std::fs::metadata(&req.export_file_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     Ok(DatabaseExportResponse {
         engine: engine.as_str().to_string(),
@@ -459,33 +506,20 @@ pub fn import_database(
     validate_dump_path(&req.import_file_path, &req.tenant_username)
         .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
 
-    let import_path = Path::new(&req.import_file_path);
-    if !runner.path_exists(import_path) {
-        return Err(AgentError::InvalidInput(format!(
-            "Berkas impor tidak ditemukan: '{}'",
-            req.import_file_path
-        )));
-    }
-
-    match engine {
-        DatabaseEngine::MariaDb => {
-            let source_cmd = format!("source {}", req.import_file_path);
-            runner.run_command("mariadb", &["-e", &source_cmd, &req.name])?;
-        }
-        DatabaseEngine::PostgreSql => {
-            runner.run_command(
-                "psql",
-                &[
-                    "-U",
-                    "postgres",
-                    "-d",
-                    &req.name,
-                    "-f",
-                    &req.import_file_path,
-                ],
-            )?;
-        }
-    }
+    crate::database_transfer::transfer(
+        runner,
+        &crate::database_transfer::DatabaseFileTransfer {
+            engine: &req.engine,
+            name: &req.name,
+            db_user: req.db_user.as_deref().ok_or_else(|| {
+                AgentError::InvalidInput("Pengguna database wajib tersedia".into())
+            })?,
+            tenant_username: &req.tenant_username,
+            tenant_uid: req.tenant_uid,
+            path: &req.import_file_path,
+            import: true,
+        },
+    )?;
 
     Ok(DatabaseImportResponse {
         engine: engine.as_str().to_string(),
@@ -507,6 +541,7 @@ pub fn check_database_size(
     let engine =
         DatabaseEngine::parse(&req.engine).map_err(|e| AgentError::InvalidInput(e.to_string()))?;
 
+    sql_identifier(&req.name)?;
     let size_bytes = match engine {
         DatabaseEngine::MariaDb => {
             let sql = format!(
@@ -543,6 +578,51 @@ pub fn check_database_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sql_fragments_are_rejected_before_privileged_commands() {
+        for encoding in ["utf8mb4; SELECT 1", "utf8mb4\n", "utf8mb4'", "UTF8$$", ""] {
+            let mock = MockSystemRunner::new();
+            let req = DatabaseCreateRequest {
+                engine: "mariadb".into(),
+                name: "p_alice_db".into(),
+                db_user: "p_alice_db".into(),
+                password: "fixturePassword123!".into(),
+                remote_access: false,
+                allowed_hosts: "localhost".into(),
+                character_set: encoding.into(),
+                collation: "utf8mb4_unicode_ci".into(),
+            };
+            assert!(create_database(&mock, &req).is_err(), "{encoding}");
+            assert!(mock.recorded_actions().is_empty());
+        }
+    }
+    #[test]
+    fn postgres_password_cannot_terminate_the_procedural_block() {
+        let mock = MockSystemRunner::new();
+        let req = DatabaseCreateRequest {
+            engine: "postgresql".into(),
+            name: "p_alice_db".into(),
+            db_user: "p_alice_db".into(),
+            password: "fixturePass$$word123!".into(),
+            remote_access: false,
+            allowed_hosts: "localhost".into(),
+            character_set: "UTF8".into(),
+            collation: "utf8mb4_unicode_ci".into(),
+        };
+        create_database(&mock, &req).unwrap();
+        let commands = mock.get_commands();
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.contains("fixturePass$$word123!"))
+        );
+        // The validated SQL is sent over stdin; the mock records no password.
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.starts_with("runuser --user postgres -- psql --no-psqlrc"))
+        );
+    }
     use crate::system::MockSystemRunner;
 
     #[test]
@@ -627,6 +707,13 @@ mod tests {
     #[test]
     fn test_database_export_and_import() {
         let mock = MockSystemRunner::new();
+        mock.set_file_content(crate::crypto::DEFAULT_MASTER_KEY_PATH, &[7; 32]);
+        mock.set_response(
+            "getent passwd p_alice",
+            0,
+            b"p_alice:x:10001:10001::/home/p_alice:/bin/bash\n",
+            b"",
+        );
         let export_path = "/home/p_alice/backup.sql";
         mock.set_file_content(export_path, b"CREATE TABLE t1;");
 
@@ -640,7 +727,15 @@ mod tests {
         };
         let exp_res = export_database(&mock, &exp_req).expect("export");
         assert!(exp_res.success);
-        assert_eq!(exp_res.size_bytes, 16);
+        assert_eq!(exp_res.size_bytes, 0); // The mock never writes to the host.
+        assert!(mock.recorded_actions().iter().any(|a| matches!(
+            a,
+            crate::system::MockAction::DatabaseTransfer {
+                import: false,
+                uid: 10001,
+                ..
+            }
+        )));
 
         let imp_req = DatabaseImportRequest {
             engine: "mariadb".to_string(),

@@ -76,6 +76,30 @@ async fn test_api_healthz_and_system_info_endpoints() {
         .await
         .expect("run migrations");
 
+    let admin = panel_db::repositories::SqliteUserRepository::new(pool.clone())
+        .create(&panel_db::models::CreateUser {
+            username: "ipcadmin".into(),
+            email: None,
+            password_hash: "unused-fixture".into(),
+            role: "admin".into(),
+            linux_username: None,
+            linux_uid: None,
+            plan_id: None,
+        })
+        .await
+        .unwrap();
+    let token = "ipc-admin-session-fixture";
+    panel_db::repositories::SqliteSessionRepository::new(pool.clone())
+        .create(&panel_db::models::CreateSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: admin.id,
+            token_hash: panel_core::auth::hash_token(token),
+            ip_address: None,
+            user_agent: None,
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+        })
+        .await
+        .unwrap();
     let lockout_manager = Arc::new(panel_api::auth::LockoutManager::new(5, 900));
 
     let agent_client = Arc::new(AgentClient::new(sock_path));
@@ -106,9 +130,25 @@ async fn test_api_healthz_and_system_info_endpoints() {
     let body_str = String::from_utf8_lossy(&body_bytes);
     assert!(body_str.contains("\"status\":\"ok\""));
 
+    // System inventory is private; healthz remains public.
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/system/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     // 2. Test /api/v1/system/info
     let req = Request::builder()
         .uri("/api/v1/system/info")
+        .header(
+            "cookie",
+            format!("{}={token}", panel_api::auth::SESSION_COOKIE_NAME),
+        )
         .body(Body::empty())
         .expect("build request");
     let res = app.clone().oneshot(req).await.expect("execute request");

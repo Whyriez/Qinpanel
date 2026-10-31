@@ -97,6 +97,8 @@ pub struct ConnectivityQuery {
     pub page: Option<u32>,
     pub per_page: Option<u32>,
     pub service: Option<EndpointService>,
+    /// Restrict metadata, counts and pagination to an authorized project.
+    pub site_id: Option<i64>,
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -185,16 +187,32 @@ pub async fn overview(
             "Gunakan halaman mulai 1 dan ukuran halaman 1 sampai 100.",
         ));
     }
-    let service_counts = repo.service_counts(actor.id).await.map_err(db_error)?;
+    let admin = actor.role == "admin";
+    let mut projects = sqlx::query_as::<_, ProjectOption>("SELECT s.id,COALESCE((SELECT d.name FROM domains d WHERE d.site_id=s.id ORDER BY d.is_primary DESC,d.id LIMIT 1),'Situs #' || s.id) AS name FROM sites s JOIN users u ON u.id=s.user_id WHERE u.status='active' AND s.status!='suspended' AND (? OR s.user_id=?) ORDER BY name,s.id")
+        .bind(admin).bind(actor.id).fetch_all(&state.pool).await.map_err(DbError::from).map_err(db_error)?;
+    if let Some(site_id) = query.site_id {
+        if !projects.iter().any(|project| project.id == site_id) {
+            return Err(problem(
+                StatusCode::NOT_FOUND,
+                "Project tidak ditemukan atau tidak dapat diakses.",
+            ));
+        }
+        projects.retain(|project| project.id == site_id);
+    }
+    let service_counts = repo
+        .scoped_service_counts(actor.id, query.site_id)
+        .await
+        .map_err(db_error)?;
     let total = query
         .service
         .map(|service| service_counts.get(service.as_str()).copied().unwrap_or(0))
         .unwrap_or_else(|| service_counts.values().sum());
     let mut endpoints = Vec::new();
     for endpoint in repo
-        .list_page(
+        .list_scoped_page(
             actor.id,
             query.service,
+            query.site_id,
             per_page,
             u64::from(page - 1) * u64::from(per_page),
         )
@@ -210,12 +228,9 @@ pub async fn overview(
             evidence: evidence.into_iter().map(Into::into).collect(),
         });
     }
-    let admin = actor.role == "admin";
-    let projects = sqlx::query_as::<_, ProjectOption>("SELECT s.id,COALESCE((SELECT d.name FROM domains d WHERE d.site_id=s.id ORDER BY d.is_primary DESC,d.id LIMIT 1),'Situs #' || s.id) AS name FROM sites s JOIN users u ON u.id=s.user_id WHERE u.status='active' AND s.status!='suspended' AND (? OR s.user_id=?) ORDER BY name,s.id")
-        .bind(admin).bind(actor.id).fetch_all(&state.pool).await.map_err(DbError::from).map_err(db_error)?;
     let certificates = if admin {
-        sqlx::query_as::<_, CertificateOption>("SELECT c.id,c.site_id,c.primary_domain AS name FROM certificates c JOIN sites s ON s.id=c.site_id JOIN users u ON u.id=s.user_id WHERE u.status='active' AND s.status!='suspended' ORDER BY c.id")
-            .fetch_all(&state.pool).await.map_err(DbError::from).map_err(db_error)?
+        sqlx::query_as::<_, CertificateOption>("SELECT c.id,c.site_id,c.primary_domain AS name FROM certificates c JOIN sites s ON s.id=c.site_id JOIN users u ON u.id=s.user_id WHERE u.status='active' AND s.status!='suspended' AND (? IS NULL OR c.site_id=?) ORDER BY c.id")
+            .bind(query.site_id).bind(query.site_id).fetch_all(&state.pool).await.map_err(DbError::from).map_err(db_error)?
     } else {
         Vec::new()
     };

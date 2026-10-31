@@ -8,6 +8,7 @@ pub mod cloudflare;
 pub mod connectivity;
 pub mod cron;
 pub mod crypto;
+pub mod database_transfer;
 pub mod database_web;
 pub mod databases;
 pub mod dns01;

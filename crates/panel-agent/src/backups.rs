@@ -17,7 +17,11 @@ use std::{
 fn invalid() -> AgentError {
     AgentError::InvalidInput("Identitas atau direktori cadangan tenant tidak valid".into())
 }
-fn identity(runner: &dyn SystemRunner, name: &str, uid: Option<u32>) -> Result<u32, AgentError> {
+pub(crate) fn identity(
+    runner: &dyn SystemRunner,
+    name: &str,
+    uid: Option<u32>,
+) -> Result<u32, AgentError> {
     panel_core::Username::parse(name).map_err(|_| invalid())?;
     let out = runner.run_command("getent", &["passwd", name])?;
     let record = String::from_utf8_lossy(&out.stdout);
@@ -62,11 +66,8 @@ fn database(db: &BackupDatabaseInfo) -> Result<(), AgentError> {
     }
     Ok(())
 }
-fn pg(db: &BackupDatabaseInfo) -> bool {
-    ["postgres", "postgresql"].contains(&db.engine.as_str())
-}
 fn string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    path.to_string_lossy().replace('\\', "/")
 }
 fn private_dump(runner: &dyn SystemRunner) -> Result<PathBuf, AgentError> {
     let dir = PathBuf::from("/var/lib/qonpanel-migration/legacy-dumps")
@@ -167,52 +168,20 @@ pub fn create_backup(
             let dest = string(&staging.join("databases"));
             tenant(runner, name, &["mkdir", "-p", "-m", "0700", "--", &dest])?;
             for db in &req.databases {
-                let private = private_dump(runner)?;
                 let rel = format!("databases/{}.sql", db.name);
                 let target = string(&staging.join(&rel));
-                let export = (|| {
-                    if pg(db) {
-                        runner.backup_file_stream(
-                            "runuser",
-                            &[
-                                "-u",
-                                "postgres",
-                                "--",
-                                "pg_dump",
-                                "--no-owner",
-                                "--no-acl",
-                                "--dbname",
-                                &db.name,
-                            ],
-                            &private,
-                            false,
-                        )?;
-                    } else {
-                        // Root can write only an agent-generated private file, never a tenant symlink.
-                        runner.backup_file_stream(
-                            "mariadb-dump",
-                            &[
-                                "--single-transaction",
-                                "--quick",
-                                "--routines",
-                                "--triggers",
-                                "--no-tablespaces",
-                                &db.name,
-                            ],
-                            &private,
-                            false,
-                        )?;
-                    }
-                    runner.backup_file_stream(
-                        "runuser",
-                        &["-u", name, "--", "tee", "--", &target],
-                        &private,
-                        true,
-                    )?;
-                    Ok::<(), AgentError>(())
-                })();
-                cleanup_dump(runner, &private);
-                export?;
+                crate::database_transfer::transfer(
+                    runner,
+                    &crate::database_transfer::DatabaseFileTransfer {
+                        engine: &db.engine,
+                        name: &db.name,
+                        db_user: &db.username,
+                        tenant_username: name,
+                        tenant_uid: uid,
+                        path: &target,
+                        import: false,
+                    },
+                )?;
                 manifest.databases.push(BackupDatabaseManifestEntry {
                     engine: db.engine.clone(),
                     name: db.name.clone(),
@@ -328,50 +297,18 @@ pub fn restore_backup(
             for db in &req.databases {
                 // Import only the explicitly registered database names, never archive-supplied names.
                 let input = string(&staging.join(format!("databases/{}.sql", db.name)));
-                let private = private_dump(runner)?;
-                let import = (|| {
-                    runner.backup_file_stream(
-                        "runuser",
-                        &["-u", name, "--", "cat", "--", &input],
-                        &private,
-                        false,
-                    )?;
-                    if pg(db) {
-                        runner.backup_file_stream(
-                            "runuser",
-                            &[
-                                "-u",
-                                "postgres",
-                                "--",
-                                "psql",
-                                "--no-psqlrc",
-                                "--set",
-                                "ON_ERROR_STOP=1",
-                                "--dbname",
-                                &db.name,
-                            ],
-                            &private,
-                            true,
-                        )?;
-                    } else {
-                        // Disable client commands such as system/source and local file loading.
-                        runner.backup_file_stream(
-                            "mariadb",
-                            &[
-                                "--binary-mode",
-                                "--batch",
-                                "--local-infile=0",
-                                "--database",
-                                &db.name,
-                            ],
-                            &private,
-                            true,
-                        )?;
-                    }
-                    Ok::<(), AgentError>(())
-                })();
-                cleanup_dump(runner, &private);
-                import?;
+                crate::database_transfer::transfer(
+                    runner,
+                    &crate::database_transfer::DatabaseFileTransfer {
+                        engine: &db.engine,
+                        name: &db.name,
+                        db_user: &db.username,
+                        tenant_username: name,
+                        tenant_uid: uid,
+                        path: &input,
+                        import: true,
+                    },
+                )?;
                 databases += 1;
             }
         }
@@ -485,6 +422,7 @@ mod tests {
     #[test]
     fn restore_drops_uid_and_disables_database_client_shell_commands() {
         let runner = runner();
+        runner.set_file_content(crate::crypto::DEFAULT_MASTER_KEY_PATH, &[7; 32]);
         let result = restore_backup(
             &runner,
             &BackupRestoreRequest {
@@ -496,9 +434,9 @@ mod tests {
                 restore_files: true,
                 restore_databases: true,
                 databases: vec![BackupDatabaseInfo {
-                    name: "alice_db".into(),
+                    name: "p_alice_db".into(),
                     engine: "mariadb".into(),
-                    username: "alice".into(),
+                    username: "p_alice_user".into(),
                     password: None,
                 }],
             },
@@ -506,9 +444,11 @@ mod tests {
         .unwrap();
         assert_eq!(result.restored_databases_count, 1);
         let commands = runner.get_commands();
-        assert!(commands.iter().any(|c| {
-            c.contains("mariadb --binary-mode --batch --local-infile=0 --database alice_db")
-        }));
+        assert!(runner.recorded_actions().iter().any(|action| matches!(action,
+            crate::system::MockAction::DatabaseTransfer { import: true, uid: 10000, name, .. } if name == "p_alice_db")));
+        assert!(!commands.iter().any(
+            |c| c.starts_with("mariadb --binary-mode") || c.starts_with("runuser -u postgres")
+        ));
         assert!(
             !commands.iter().any(|c| c.starts_with("tar ")
                 || c.starts_with("psql ")

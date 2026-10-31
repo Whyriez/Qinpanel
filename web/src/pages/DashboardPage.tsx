@@ -56,7 +56,7 @@ export function DashboardPage({
   const loadData = useCallback(async () => {
     setLoading(!loaded.current);
     const [system, website, host, sample] = await Promise.allSettled([
-      fetchSystemInfo(),
+      admin ? fetchSystemInfo() : Promise.resolve(null),
       fetchSites(),
       admin
         ? fetchSystemAnalyticsTimeseries({ interval: "1m" })
@@ -168,7 +168,7 @@ export function DashboardPage({
             </p>
           </div>
         </div>
-        <StatusPill
+        {admin && <StatusPill
           variant={
             loading || infoError
               ? "neutral"
@@ -185,7 +185,7 @@ export function DashboardPage({
                   ? t("design.managementConnected")
                   : t("design.managementDisconnected")
           }
-        />
+        />}
       </div>
       {admin && (
         <section

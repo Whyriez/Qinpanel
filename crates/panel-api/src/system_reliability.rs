@@ -23,7 +23,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 use utoipa::ToSchema;
 
-use crate::{auth::RequireAdminCsrf, routes::AppState};
+use crate::{
+    auth::{RequireAdmin, RequireAdminCsrf},
+    routes::AppState,
+};
 
 fn map_proto_category(cat: &str) -> DoctorCheckCategory {
     match cat {
@@ -100,7 +103,10 @@ pub struct RestoreSystemBackupPayload {
     ),
     tag = "system"
 )]
-pub async fn get_system_doctor_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn get_system_doctor_handler(
+    State(state): State<AppState>,
+    _auth: RequireAdmin,
+) -> impl IntoResponse {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -418,6 +424,47 @@ pub async fn fix_system_doctor_handler(
     (StatusCode::OK, Json(report)).into_response()
 }
 
+// Reconciliation must use the same identity and validated vhost renderer as
+// normal site apply, never guessed UIDs or an empty replacement config.
+async fn reconcile_site_input(
+    pool: &panel_db::pool::DbPool,
+    site: &panel_db::models::Site,
+) -> Result<ReconcileSiteInputDto, (StatusCode, String)> {
+    let failure = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Konteks rekonsiliasi tenant tidak dapat diverifikasi".into(),
+        )
+    };
+    let owner = panel_db::repositories::SqliteUserRepository::new(pool.clone())
+        .find_by_id(site.user_id)
+        .await
+        .map_err(|_| failure())?
+        .ok_or_else(failure)?;
+    let (username, uid) = crate::tenant_context::execution_identity(&owner)?;
+    let domains = SqliteDomainRepository::new(pool.clone())
+        .find_by_site_id(site.id)
+        .await
+        .map_err(|_| failure())?;
+    let domain = domains
+        .iter()
+        .find(|domain| domain.is_primary)
+        .ok_or_else(failure)?
+        .name
+        .clone();
+    let config_content = crate::sites::render_site_vhost(pool, site, &owner, &domains).await?;
+    Ok(ReconcileSiteInputDto {
+        site_id: site.id,
+        domain,
+        username,
+        uid,
+        kind: site.kind.clone(),
+        docroot: site.docroot.clone(),
+        config_content,
+        is_active: site.status == "active",
+    })
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/system/reconcile",
@@ -426,38 +473,32 @@ pub async fn fix_system_doctor_handler(
     ),
     tag = "system"
 )]
-pub async fn get_system_reconcile_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
+pub async fn get_system_reconcile_handler(
+    State(state): State<AppState>,
+    _auth: RequireAdmin,
+) -> Response {
     let site_repo = SqliteSiteRepository::new(state.pool.clone());
-    let domain_repo = SqliteDomainRepository::new(state.pool.clone());
     let job_repo = state.job_runner.job_repo.clone();
 
-    let sites = site_repo.list_all().await.unwrap_or_default();
+    let sites = match site_repo.list_all().await {
+        Ok(sites) => sites,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Inventaris project tidak tersedia"})),
+            )
+                .into_response();
+        }
+    };
     let mut desired_sites_dto = Vec::new();
 
-    for s in &sites {
-        let domain_name = domain_repo
-            .find_primary_by_site_id(s.id)
-            .await
-            .ok()
-            .flatten()
-            .map(|d| d.name)
-            .unwrap_or_else(|| format!("site-{}.local", s.id));
-
-        desired_sites_dto.push(ReconcileSiteInputDto {
-            site_id: s.id,
-            domain: domain_name,
-            username: format!("siteuser{}", s.user_id),
-            uid: 1000 + (s.user_id as u32),
-            kind: s.kind.clone(),
-            docroot: s.docroot.clone(),
-            config_content: String::new(),
-            is_active: s.status == "active",
-        });
+    for site in &sites {
+        match reconcile_site_input(&state.pool, site).await {
+            Ok(input) => desired_sites_dto.push(input),
+            Err((code, message)) => {
+                return (code, Json(serde_json::json!({"error":message}))).into_response();
+            }
+        }
     }
 
     // Call Agent for drift detection
@@ -473,11 +514,8 @@ pub async fn get_system_reconcile_handler(State(state): State<AppState>) -> impl
             ReconcileReport::new(res.timestamp, res.total_resources_checked, core_drifts)
         }
         Err(e) => {
-            warn!(
-                "Agent IPC reconcile call failed, returning local drift calculation: {}",
-                e
-            );
-            ReconcileReport::new(now, sites.len(), vec![])
+            warn!(error=%e, "Agent reconcile unavailable");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"Rekonsiliasi agent belum terbukti; coba kembali setelah agent tersedia"}))).into_response();
         }
     };
 
@@ -500,7 +538,7 @@ pub async fn get_system_reconcile_handler(State(state): State<AppState>) -> impl
         report.is_clean = false;
     }
 
-    (StatusCode::OK, Json(report))
+    (StatusCode::OK, Json(report)).into_response()
 }
 
 #[utoipa::path(
@@ -511,41 +549,35 @@ pub async fn get_system_reconcile_handler(State(state): State<AppState>) -> impl
     ),
     tag = "system"
 )]
-pub async fn apply_system_reconcile_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
+pub async fn apply_system_reconcile_handler(
+    State(state): State<AppState>,
+    _auth: RequireAdminCsrf,
+) -> Response {
     let site_repo = SqliteSiteRepository::new(state.pool.clone());
-    let domain_repo = SqliteDomainRepository::new(state.pool.clone());
     let job_repo = state.job_runner.job_repo.clone();
 
     // 1. Recover jobs
     let _ = job_repo.recover_interrupted_jobs().await;
 
-    let sites = site_repo.list_all().await.unwrap_or_default();
+    let sites = match site_repo.list_all().await {
+        Ok(sites) => sites,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Inventaris project tidak tersedia"})),
+            )
+                .into_response();
+        }
+    };
     let mut desired_sites_dto = Vec::new();
 
-    for s in &sites {
-        let domain_name = domain_repo
-            .find_primary_by_site_id(s.id)
-            .await
-            .ok()
-            .flatten()
-            .map(|d| d.name)
-            .unwrap_or_else(|| format!("site-{}.local", s.id));
-
-        desired_sites_dto.push(ReconcileSiteInputDto {
-            site_id: s.id,
-            domain: domain_name,
-            username: format!("siteuser{}", s.user_id),
-            uid: 1000 + (s.user_id as u32),
-            kind: s.kind.clone(),
-            docroot: s.docroot.clone(),
-            config_content: String::new(),
-            is_active: s.status == "active",
-        });
+    for site in &sites {
+        match reconcile_site_input(&state.pool, site).await {
+            Ok(input) => desired_sites_dto.push(input),
+            Err((code, message)) => {
+                return (code, Json(serde_json::json!({"error":message}))).into_response();
+            }
+        }
     }
 
     // Call Agent with dry_run = false to reconcile state
@@ -561,12 +593,12 @@ pub async fn apply_system_reconcile_handler(State(state): State<AppState>) -> im
             ReconcileReport::new(res.timestamp, res.total_resources_checked, core_drifts)
         }
         Err(e) => {
-            warn!("Agent IPC reconcile apply returned error: {}", e);
-            ReconcileReport::new(now, sites.len(), vec![])
+            warn!(error=%e, "Agent reconcile unavailable");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"Rekonsiliasi agent belum terbukti; coba kembali setelah agent tersedia"}))).into_response();
         }
     };
 
-    (StatusCode::OK, Json(report))
+    (StatusCode::OK, Json(report)).into_response()
 }
 
 #[utoipa::path(
@@ -577,7 +609,10 @@ pub async fn apply_system_reconcile_handler(State(state): State<AppState>) -> im
     ),
     tag = "system"
 )]
-pub async fn list_system_backups_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn list_system_backups_handler(
+    State(state): State<AppState>,
+    _auth: RequireAdmin,
+) -> impl IntoResponse {
     let req = SystemBackupListRequest { backups_dir: None };
     match state.agent_client.system_backup_list(req).await {
         Ok(res) => {
@@ -659,6 +694,7 @@ fn scan_fallback_backup_dir(backup_dir: &Path) -> Vec<SystemBackupSummary> {
 )]
 pub async fn create_system_backup_handler(
     State(state): State<AppState>,
+    _auth: RequireAdminCsrf,
     Json(payload): Json<Option<CreateSystemBackupPayload>>,
 ) -> impl IntoResponse {
     // SQLite's snapshot operation includes WAL data without stopping all writers.
@@ -721,6 +757,7 @@ pub async fn create_system_backup_handler(
 )]
 pub async fn restore_system_backup_handler(
     State(state): State<AppState>,
+    _auth: RequireAdminCsrf,
     Json(payload): Json<RestoreSystemBackupPayload>,
 ) -> impl IntoResponse {
     let req = SystemBackupRestoreRequest {
@@ -749,5 +786,93 @@ pub async fn restore_system_backup_handler(
                 }),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod reconciliation_security_tests {
+    use super::*;
+    #[tokio::test]
+    async fn reconciliation_uses_registered_identity_and_a_validated_nonempty_vhost() {
+        let pool = panel_db::pool::init_pool("sqlite::memory:").await.unwrap();
+        panel_db::pool::run_migrations(&pool).await.unwrap();
+        sqlx::query("INSERT INTO users(id,username,password_hash,role,status,linux_username,linux_uid,created_at,updated_at) VALUES(1,'audit','fixture','user','active','p_audit',10042,1,1)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sites(id,user_id,kind,docroot,status,settings_json,created_at,updated_at) VALUES(1,1,'static','/home/p_audit/web/audit.test/public','active','{}',1,1)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO domains(site_id,name,unicode_name,is_primary,status,created_at,updated_at) VALUES(1,'audit.test','audit.test',1,'active',1,1)").execute(&pool).await.unwrap();
+        let site = SqliteSiteRepository::new(pool.clone())
+            .find_by_id(1)
+            .await
+            .unwrap()
+            .unwrap();
+        let input = reconcile_site_input(&pool, &site).await.unwrap();
+        assert_eq!((input.username.as_str(), input.uid), ("p_audit", 10042));
+        assert!(input.config_content.contains("server_name audit.test"));
+        assert!(
+            input
+                .config_content
+                .contains("disable_symlinks if_not_owner")
+        );
+        sqlx::query("UPDATE sites SET docroot='/home/p_other/web/foreign/public' WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let foreign = SqliteSiteRepository::new(pool.clone())
+            .find_by_id(1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reconcile_site_input(&pool, &foreign).await.unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        sqlx::query("UPDATE sites SET kind='python',docroot='/home/p_audit/web/audit.test/public' WHERE id=1").execute(&pool).await.unwrap();
+        for field in ["static_dir", "media_dir"] {
+            for path in [
+                "/home/p_other/web/private",
+                "/home/p_audit/../p_other/private",
+                "/home/p_audit/$http_host",
+                "/home/p_audit2/private",
+                "/etc/panel",
+            ] {
+                let mut settings =
+                    serde_json::json!({"static_url":"/static/","media_url":"/media/"});
+                settings[field] = path.into();
+                sqlx::query("UPDATE sites SET settings_json=? WHERE id=1")
+                    .bind(settings.to_string())
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let site = SqliteSiteRepository::new(pool.clone())
+                    .find_by_id(1)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    reconcile_site_input(&pool, &site).await.unwrap_err().0,
+                    StatusCode::FORBIDDEN,
+                    "{field}: {path}"
+                );
+            }
+        }
+        sqlx::query("UPDATE sites SET settings_json=? WHERE id=1")
+            .bind(serde_json::json!({"static_url":"/static/","static_dir":"/home/p_audit/web/audit.test/static","socket_path":"/run/panel/python/site_999/app.sock"}).to_string())
+            .execute(&pool).await.unwrap();
+        let python = SqliteSiteRepository::new(pool.clone())
+            .find_by_id(1)
+            .await
+            .unwrap()
+            .unwrap();
+        let rendered = reconcile_site_input(&pool, &python)
+            .await
+            .unwrap()
+            .config_content;
+        assert!(rendered.contains("/home/p_audit/web/audit.test/static"));
+        assert!(rendered.contains("site_1/app.sock"));
+        assert!(!rendered.contains("site_999/app.sock"));
+        sqlx::query("UPDATE users SET linux_uid=1001 WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(reconcile_site_input(&pool, &site).await.is_err());
     }
 }

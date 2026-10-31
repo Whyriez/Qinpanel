@@ -304,11 +304,27 @@ async fn create_alice_site(ctx: &TestContext, name: &str) -> i64 {
 async fn test_validate_cron_expression_api() {
     let ctx = setup_test_context().await;
 
+    let anonymous = Request::builder()
+        .method("POST")
+        .uri("/api/v1/sites/0/cron/validate")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"expression":"*/15 * * * *"}"#))
+        .unwrap();
+    assert_eq!(
+        ctx.app.clone().oneshot(anonymous).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
     // 1. Valid expression
     let req = Request::builder()
         .method("POST")
         .uri("/api/v1/sites/0/cron/validate")
         .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, ctx.alice_session),
+        )
+        .header(CSRF_HEADER_NAME, &ctx.alice_csrf)
         .body(Body::from(
             serde_json::to_string(&serde_json::json!({
                 "expression": "*/15 * * * *"
@@ -331,6 +347,11 @@ async fn test_validate_cron_expression_api() {
         .method("POST")
         .uri("/api/v1/sites/0/cron/validate")
         .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, ctx.alice_session),
+        )
+        .header(CSRF_HEADER_NAME, &ctx.alice_csrf)
         .body(Body::from(
             serde_json::to_string(&serde_json::json!({
                 "expression": "60 * * * *"

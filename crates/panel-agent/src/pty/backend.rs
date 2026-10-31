@@ -249,7 +249,36 @@ impl Drop for UnixPtyHandle {
 impl PtyBackend for UnixPtyBackend {
     fn spawn(&self, config: &PtySpawnConfig) -> Result<Box<dyn PtyHandle>, AgentError> {
         use std::ffi::CString;
+        use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStrExt;
+
+        panel_core::Username::parse(&config.username)
+            .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
+        panel_core::tenant::TenantUid::parse(config.uid)
+            .map_err(|e| AgentError::InvalidInput(e.to_string()))?;
+        if config.gid != config.uid {
+            return Err(AgentError::SecurityViolation(
+                "Identitas terminal tidak valid".into(),
+            ));
+        }
+        crate::backups::identity(
+            &crate::system::RealSystemRunner,
+            &config.username,
+            Some(config.uid),
+        )?;
+        let expected_slice = format!("panel-u{}.slice", config.uid);
+        if config.slice_name.as_deref() != Some(expected_slice.as_str()) {
+            return Err(AgentError::SecurityViolation(
+                "Slice terminal tenant wajib tersedia".into(),
+            ));
+        }
+        let slice_procs = config
+            .cgroup_base
+            .join("panel.slice")
+            .join(&expected_slice)
+            .join("cgroup.procs");
+        let slice_file = std::fs::OpenOptions::new().write(true).open(slice_procs)?;
+        let slice_fd = slice_file.as_raw_fd();
 
         let mut master_fd: libc::c_int = -1;
         let mut slave_fd: libc::c_int = -1;
@@ -291,8 +320,6 @@ impl PtyBackend for UnixPtyBackend {
             .map_err(|e| AgentError::InvalidInput(format!("Invalid cwd: {e}")))?;
         let c_shell = CString::new(config.shell.as_bytes())
             .map_err(|e| AgentError::InvalidInput(format!("Invalid shell: {e}")))?;
-        let c_user = CString::new(config.username.as_bytes())
-            .map_err(|e| AgentError::InvalidInput(format!("Invalid username: {e}")))?;
 
         // Prepare environment variables
         let env_home = CString::new(format!("HOME=/home/{}", config.username)).map_err(|_| {
@@ -353,45 +380,74 @@ impl PtyBackend for UnixPtyBackend {
                 libc::close(master_fd);
 
                 // Create new session leader
-                libc::setsid();
+                if libc::setsid() < 0 {
+                    libc::_exit(126);
+                }
 
                 // Set controlling terminal
-                libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
+                if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) < 0 {
+                    libc::_exit(126);
+                }
 
                 // Duplicate slave FD to standard descriptors
-                libc::dup2(slave_fd, libc::STDIN_FILENO);
-                libc::dup2(slave_fd, libc::STDOUT_FILENO);
-                libc::dup2(slave_fd, libc::STDERR_FILENO);
+                if libc::dup2(slave_fd, libc::STDIN_FILENO) < 0
+                    || libc::dup2(slave_fd, libc::STDOUT_FILENO) < 0
+                    || libc::dup2(slave_fd, libc::STDERR_FILENO) < 0
+                {
+                    libc::_exit(126);
+                }
 
                 if slave_fd > libc::STDERR_FILENO {
                     libc::close(slave_fd);
                 }
 
                 // Hardening: PR_SET_NO_NEW_PRIVS ensures child cannot gain privileges
-                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
+                    libc::_exit(126);
+                }
+                // Attach self before any tenant code can run. No parent-side
+                // best-effort attachment or race with a forked login shell.
+                if libc::write(slice_fd, b"0\n".as_ptr().cast(), 2) != 2 {
+                    libc::_exit(126);
+                }
+                libc::close(slice_fd);
 
                 // Hardening: Resource limits (rlimit)
                 let rlim_nproc = libc::rlimit {
                     rlim_cur: 256,
                     rlim_max: 512,
                 };
-                libc::setrlimit(libc::RLIMIT_NPROC, &rlim_nproc);
+                if libc::setrlimit(libc::RLIMIT_NPROC, &rlim_nproc) < 0 {
+                    libc::_exit(126);
+                }
 
                 let rlim_nofile = libc::rlimit {
                     rlim_cur: 1024,
                     rlim_max: 2048,
                 };
-                libc::setrlimit(libc::RLIMIT_NOFILE, &rlim_nofile);
-
-                // Change working directory to confined folder
-                if libc::chdir(c_cwd.as_ptr()) != 0 {
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim_nofile) < 0 {
                     libc::_exit(126);
                 }
 
                 // Drop privileges to tenant UID/GID
-                libc::initgroups(c_user.as_ptr(), target_gid);
-                libc::setresgid(target_gid, target_gid, target_gid);
-                libc::setresuid(target_uid, target_uid, target_uid);
+                if libc::setgroups(0, std::ptr::null()) < 0
+                    || libc::setresgid(target_gid, target_gid, target_gid) < 0
+                    || libc::setresuid(target_uid, target_uid, target_uid) < 0
+                    || libc::getuid() != target_uid
+                    || libc::geteuid() != target_uid
+                    || libc::getgid() != target_gid
+                    || libc::getegid() != target_gid
+                    || libc::getgroups(0, std::ptr::null_mut()) != 0
+                {
+                    libc::_exit(126);
+                }
+
+                // Resolve tenant-controlled paths only after dropping privilege.
+                // A symlink swapped after validation must not enter another
+                // tenant's readable subtree using root's traversal permission.
+                if libc::chdir(c_cwd.as_ptr()) != 0 {
+                    libc::_exit(126);
+                }
 
                 // Execute login shell
                 libc::execve(c_shell.as_ptr(), argv.as_ptr(), envp.as_ptr());
@@ -409,14 +465,6 @@ impl PtyBackend for UnixPtyBackend {
         }
 
         let child_pid = pid as u32;
-
-        // Attach child PID to tenant cgroup slice if configured
-        if let Some(slice) = &config.slice_name {
-            let slice_procs = config.cgroup_base.join(slice).join("cgroup.procs");
-            if slice_procs.exists() {
-                let _ = std::fs::write(&slice_procs, format!("{}\n", child_pid));
-            }
-        }
 
         Ok(Box::new(UnixPtyHandle {
             pid: child_pid,

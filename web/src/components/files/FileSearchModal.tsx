@@ -180,7 +180,7 @@ export const FileSearchModal: React.FC<FileSearchModalProps> = ({
 
   return (
     <ModalOverlay
-      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/75 backdrop-blur-xs"
+      className="fb-modal fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/75 backdrop-blur-xs"
       role="dialog"
       aria-modal="true"
       aria-labelledby={`${modalId}-title`}

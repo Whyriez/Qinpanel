@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { BreakdownTable } from '../BreakdownTable';
 import { SiteBreakdownsResponse } from '../../../types/api';
+import '../../../i18n';
 
 describe('BreakdownTable Component', () => {
   const mockBreakdowns: SiteBreakdownsResponse = {
@@ -38,7 +39,7 @@ describe('BreakdownTable Component', () => {
 
   it('renders breakdown table header and paths data', () => {
     const html = renderToString(<BreakdownTable breakdowns={mockBreakdowns} />);
-    expect(html).toContain('Rincian Dimensi Lalu Lintas');
+    expect(html).toContain('Kenali sumber trafik Anda');
     expect(html).toContain('/api/v1/health');
     expect(html).toContain(mockBreakdowns.paths[0].count.toLocaleString());
     expect(html).toContain('60.0');
@@ -46,14 +47,14 @@ describe('BreakdownTable Component', () => {
 
   it('renders dimension pills', () => {
     const html = renderToString(<BreakdownTable breakdowns={mockBreakdowns} />);
-    expect(html).toContain('Jalur (Paths)');
-    expect(html).toContain('Negara (GeoIP)');
+    expect(html).toContain('Halaman');
+    expect(html).toContain('Negara');
     expect(html).toContain('Browser');
-    expect(html).toContain('URL Lambat');
+    expect(html).toContain('URL lambat');
   });
 
   it('renders empty fallback when breakdowns is null', () => {
     const html = renderToString(<BreakdownTable breakdowns={null} />);
-    expect(html).toContain('Tidak ada data ditemukan');
+    expect(html).toContain('Belum ada rincian untuk periode ini');
   });
 });

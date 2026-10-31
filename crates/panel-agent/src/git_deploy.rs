@@ -67,6 +67,69 @@ fn posix_str(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn verify_tenant(
+    runner: &dyn SystemRunner,
+    username: &str,
+    uid: u32,
+    base: &str,
+) -> Result<(), AgentError> {
+    panel_core::Username::parse(username).map_err(|e| AgentError::InvalidInput(e.to_string()))?;
+    crate::node_site::validate_app_directory(username, uid, base)?;
+    let output = runner.run_command("getent", &["passwd", username])?;
+    let record = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<_> = record.trim_end().split(':').collect();
+    if !output.status.success()
+        || fields.len() != 7
+        || fields[0] != username
+        || fields[2] != uid.to_string()
+        || fields[3] != uid.to_string()
+        || fields[5] != format!("/home/{username}")
+    {
+        return Err(AgentError::SecurityViolation(
+            "Identitas Git tenant tidak cocok dengan NSS".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Every command touching a tenant-controlled Git repository drops root first.
+/// Clear the inherited environment, including any agent service secrets.
+fn tenant_command(
+    runner: &dyn SystemRunner,
+    username: &str,
+    args: &[&str],
+    key: Option<&str>,
+) -> Result<std::process::Output, AgentError> {
+    let home = format!("HOME=/home/{username}");
+    let key_env = format!("QPANEL_DEPLOY_KEY={}", key.unwrap_or("/dev/null"));
+    let mut command = vec![
+        "-u",
+        username,
+        "--",
+        "/usr/bin/env",
+        "-i",
+        &home,
+        "PATH=/usr/local/bin:/usr/bin:/bin",
+        "GIT_TERMINAL_PROMPT=0",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        &key_env,
+        "GIT_SSH_COMMAND=/usr/bin/ssh -i \"$QPANEL_DEPLOY_KEY\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+    ];
+    command.extend_from_slice(args);
+    runner.run_command("runuser", &command)
+}
+
+fn tenant_fs(runner: &dyn SystemRunner, username: &str, args: &[&str]) -> Result<(), AgentError> {
+    let result = tenant_command(runner, username, args, None)?;
+    if !result.status.success() {
+        return Err(AgentError::Internal(
+            "Operasi direktori Git sebagai tenant gagal".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Generates an Ed25519 deploy keypair for a site, returning the public key.
 /// If a key already exists, idempotently reads and returns the existing public key.
 pub fn generate_deploy_key(
@@ -165,6 +228,8 @@ pub fn execute_git_deploy(
 ) -> Result<SiteGitDeployResponse, AgentError> {
     validate_site_id(&req.site_id)?;
     validate_username(&req.username)?;
+    validate_site_id(&req.release_id)?;
+    verify_tenant(runner, &req.username, req.uid, &req.base_dir)?;
     validate_git_repo_url(&req.repo_url).map_err(|e| AgentError::InvalidInput(e.to_string()))?;
     validate_git_branch(&req.branch).map_err(|e| AgentError::InvalidInput(e.to_string()))?;
     if let Some(sub) = &req.docroot_subpath {
@@ -179,8 +244,11 @@ pub fn execute_git_deploy(
     let release_dir = releases_dir.join(&req.release_id);
     let release_dir_str = posix_str(&release_dir);
 
-    runner.create_dir_all(&releases_dir, 0o755, req.uid, req.uid)?;
-    runner.create_dir_all(&release_dir, 0o755, req.uid, req.uid)?;
+    tenant_fs(
+        runner,
+        &req.username,
+        &["/usr/bin/mkdir", "-p", "-m", "0755", "--", &release_dir_str],
+    )?;
 
     log_output.push(format!("=== Memulai deploy release {} ===", req.release_id));
     log_output.push(format!(
@@ -189,15 +257,26 @@ pub fn execute_git_deploy(
     ));
 
     // 1. Git Clone
-    let mut git_clone_args = Vec::new();
-    let ssh_cmd_opt;
+    let mut git_clone_args = vec![
+        "/usr/bin/git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+    ];
     if let Some(key_path) = &req.deploy_key_path {
-        ssh_cmd_opt = format!(
-            "core.sshCommand=ssh -i {} -o StrictHostKeyChecking=accept-new",
-            key_path
-        );
-        git_clone_args.push("-c");
-        git_clone_args.push(&ssh_cmd_opt);
+        if key_path != &format!("{DEFAULT_DEPLOY_KEY_DIR}/site_{}_deploy_key", req.site_id) {
+            return Err(AgentError::SecurityViolation(
+                "Lokasi deploy key harus milik situs ini".into(),
+            ));
+        }
+        if runner.path_exists(Path::new(key_path)) {
+            // The key directory stays root-owned and non-writable. Only the
+            // owning tenant's primary group can read this site's private key.
+            runner.set_permissions(Path::new(DEFAULT_DEPLOY_KEY_DIR), 0o711)?;
+            runner.set_ownership(Path::new(key_path), 0, req.uid)?;
+            runner.set_permissions(Path::new(key_path), 0o640)?;
+        }
     }
     git_clone_args.extend_from_slice(&[
         "clone",
@@ -210,7 +289,12 @@ pub fn execute_git_deploy(
     ]);
 
     log_output.push(format!("$ git {}", git_clone_args.join(" ")));
-    let clone_res = runner.run_command("git", &git_clone_args);
+    let clone_res = tenant_command(
+        runner,
+        &req.username,
+        &git_clone_args,
+        req.deploy_key_path.as_deref(),
+    );
     match clone_res {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -223,7 +307,11 @@ pub fn execute_git_deploy(
             }
             if !out.status.success() {
                 let duration_ms = start_time.elapsed().as_millis() as u64;
-                let _ = runner.remove_dir_all(&release_dir);
+                let _ = tenant_fs(
+                    runner,
+                    &req.username,
+                    &["/usr/bin/rm", "-rf", "--", &release_dir_str],
+                );
                 return Ok(SiteGitDeployResponse {
                     site_id: req.site_id.clone(),
                     release_id: req.release_id.clone(),
@@ -240,7 +328,11 @@ pub fn execute_git_deploy(
         Err(e) => {
             let duration_ms = start_time.elapsed().as_millis() as u64;
             log_output.push(format!("Git clone gagal: {}", e));
-            let _ = runner.remove_dir_all(&release_dir);
+            let _ = tenant_fs(
+                runner,
+                &req.username,
+                &["/usr/bin/rm", "-rf", "--", &release_dir_str],
+            );
             return Ok(SiteGitDeployResponse {
                 site_id: req.site_id.clone(),
                 release_id: req.release_id.clone(),
@@ -259,9 +351,32 @@ pub fn execute_git_deploy(
     if let Some(target_commit) = &req.commit_hash
         && !target_commit.trim().is_empty()
     {
+        if !(7..=64).contains(&target_commit.len())
+            || !target_commit.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(AgentError::InvalidInput(
+                "Commit Git harus hash heksadesimal".into(),
+            ));
+        }
         log_output.push(format!("$ git checkout {}", target_commit));
-        let co_res =
-            runner.run_command("git", &["-C", &release_dir_str, "checkout", target_commit]);
+        let co_res = tenant_command(
+            runner,
+            &req.username,
+            &[
+                "/usr/bin/git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-C",
+                &release_dir_str,
+                "checkout",
+                "--detach",
+                target_commit,
+                "--",
+            ],
+            None,
+        );
         if let Ok(out) = co_res {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -276,15 +391,22 @@ pub fn execute_git_deploy(
 
     // 3. Extract commit author, message, and hash
     let (commit_hash, commit_author, commit_message) = {
-        let log_res = runner.run_command(
-            "git",
+        let log_res = tenant_command(
+            runner,
+            &req.username,
             &[
+                "/usr/bin/git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
                 "-C",
                 &release_dir_str,
                 "log",
                 "-1",
                 "--format=%H%n%an <%ae>%n%s",
             ],
+            None,
         );
         match log_res {
             Ok(out) if out.status.success() => {
@@ -348,7 +470,11 @@ pub fn execute_git_deploy(
                             exit_code
                         ));
                         let duration_ms = start_time.elapsed().as_millis() as u64;
-                        let _ = runner.remove_dir_all(&release_dir);
+                        let _ = tenant_fs(
+                            runner,
+                            &req.username,
+                            &["/usr/bin/rm", "-rf", "--", &release_dir_str],
+                        );
                         return Ok(SiteGitDeployResponse {
                             site_id: req.site_id.clone(),
                             release_id: req.release_id.clone(),
@@ -365,7 +491,11 @@ pub fn execute_git_deploy(
                 Err(e) => {
                     log_output.push(format!("Eksekusi build error: {}", e));
                     let duration_ms = start_time.elapsed().as_millis() as u64;
-                    let _ = runner.remove_dir_all(&release_dir);
+                    let _ = tenant_fs(
+                        runner,
+                        &req.username,
+                        &["/usr/bin/rm", "-rf", "--", &release_dir_str],
+                    );
                     return Ok(SiteGitDeployResponse {
                         site_id: req.site_id.clone(),
                         release_id: req.release_id.clone(),
@@ -423,7 +553,18 @@ pub fn execute_git_deploy(
 
     // Ensure symlink target exists
     if !runner.path_exists(&symlink_target) {
-        runner.create_dir_all(&symlink_target, 0o755, req.uid, req.uid)?;
+        tenant_fs(
+            runner,
+            &req.username,
+            &[
+                "/usr/bin/mkdir",
+                "-p",
+                "-m",
+                "0755",
+                "--",
+                &posix_str(&symlink_target),
+            ],
+        )?;
     }
 
     let current_tmp = base_dir.join("current_tmp");
@@ -434,8 +575,28 @@ pub fn execute_git_deploy(
         symlink_target.display()
     ));
 
-    runner.create_symlink(&symlink_target, &current_tmp)?;
-    runner.move_path(&current_tmp, &current_link)?;
+    tenant_fs(
+        runner,
+        &req.username,
+        &[
+            "/usr/bin/ln",
+            "-sfnT",
+            "--",
+            &posix_str(&symlink_target),
+            &posix_str(&current_tmp),
+        ],
+    )?;
+    tenant_fs(
+        runner,
+        &req.username,
+        &[
+            "/usr/bin/mv",
+            "-Tf",
+            "--",
+            &posix_str(&current_tmp),
+            &posix_str(&current_link),
+        ],
+    )?;
 
     let target_str = posix_str(&symlink_target);
     log_output.push(format!(
@@ -449,7 +610,13 @@ pub fn execute_git_deploy(
     } else {
         DEFAULT_KEEP_RELEASES
     };
-    prune_old_releases(runner, &releases_dir, keep_count, &mut log_output);
+    prune_old_releases(
+        runner,
+        &req.username,
+        &releases_dir,
+        keep_count,
+        &mut log_output,
+    );
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
     log_output.push(format!(
@@ -477,6 +644,8 @@ pub fn execute_git_rollback(
 ) -> Result<SiteGitRollbackResponse, AgentError> {
     validate_site_id(&req.site_id)?;
     validate_username(&req.username)?;
+    validate_site_id(&req.target_release_id)?;
+    verify_tenant(runner, &req.username, req.uid, &req.base_dir)?;
 
     let base_dir = Path::new(&req.base_dir);
     let target_release = base_dir.join("releases").join(&req.target_release_id);
@@ -509,8 +678,28 @@ pub fn execute_git_rollback(
     };
 
     let final_target = subpath.unwrap_or(target_release);
-    runner.create_symlink(&final_target, &current_tmp)?;
-    runner.move_path(&current_tmp, &current_link)?;
+    tenant_fs(
+        runner,
+        &req.username,
+        &[
+            "/usr/bin/ln",
+            "-sfnT",
+            "--",
+            &posix_str(&final_target),
+            &posix_str(&current_tmp),
+        ],
+    )?;
+    tenant_fs(
+        runner,
+        &req.username,
+        &[
+            "/usr/bin/mv",
+            "-Tf",
+            "--",
+            &posix_str(&current_tmp),
+            &posix_str(&current_link),
+        ],
+    )?;
 
     let target_str = posix_str(&final_target);
     let log = format!(
@@ -578,6 +767,8 @@ fn execute_isolated_command(
     uid: u32,
     env_file_path: Option<&str>,
 ) -> Result<(i32, String, String), AgentError> {
+    panel_core::tenant::TenantUid::parse(uid)
+        .map_err(|error| AgentError::InvalidInput(error.to_string()))?;
     let slice_arg = format!("--slice=panel-u{}.slice", uid);
     let uid_arg = format!("--uid={}", uid);
     let gid_arg = format!("--gid={}", uid);
@@ -586,6 +777,7 @@ fn execute_isolated_command(
 
     let mut systemd_args = vec![
         "--quiet",
+        "--property=NoNewPrivileges=yes",
         &slice_arg,
         &uid_arg,
         &gid_arg,
@@ -597,7 +789,15 @@ fn execute_isolated_command(
 
     let env_arg;
     if let Some(env_file) = env_file_path {
-        env_arg = format!("--environment-file={}", env_file);
+        if env_file.contains(['\n', '\r', '\0', '%'])
+            || !env_file.starts_with("/etc/panel/env/site-")
+            || !env_file.ends_with(".env")
+        {
+            return Err(AgentError::InvalidInput(
+                "Environment Git tidak valid".into(),
+            ));
+        }
+        env_arg = format!("--property=EnvironmentFile=-{}", env_file);
         systemd_args.push(&env_arg);
     }
 
@@ -607,27 +807,18 @@ fn execute_isolated_command(
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let code = out.status.code().unwrap_or(0);
+            let code = out.status.code().unwrap_or(1);
             Ok((code, stdout, stderr))
         }
-        Err(_) => {
-            // Fallback for non-Linux or mock environments
-            match runner.run_command("sh", &["-c", command]) {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    let code = out.status.code().unwrap_or(0);
-                    Ok((code, stdout, stderr))
-                }
-                Err(e) => Err(e),
-            }
-        }
+        // Failure to establish tenant isolation must never execute as the agent.
+        Err(error) => Err(error),
     }
 }
 
 /// Prunes older releases, keeping `keep_count` most recent.
 fn prune_old_releases(
     runner: &dyn SystemRunner,
+    username: &str,
     releases_dir: &Path,
     keep_count: u32,
     log: &mut Vec<String>,
@@ -645,7 +836,11 @@ fn prune_old_releases(
                     .unwrap_or_default()
                     .to_string_lossy();
                 log.push(format!("Menghapus release lama: {}", name));
-                let _ = runner.remove_dir_all(old_release);
+                let _ = tenant_fs(
+                    runner,
+                    username,
+                    &["/usr/bin/rm", "-rf", "--", &posix_str(old_release)],
+                );
             }
         }
     }
@@ -655,6 +850,33 @@ fn prune_old_releases(
 mod tests {
     use super::*;
     use crate::system::MockSystemRunner;
+
+    #[test]
+    fn isolation_failure_never_falls_back_to_agent_shell() {
+        let runner = MockSystemRunner::new();
+        runner.set_spawn_error("systemd-run");
+        assert!(
+            execute_isolated_command(
+                &runner,
+                "fixture-command",
+                "/home/p_alice/project",
+                10001,
+                None
+            )
+            .is_err()
+        );
+        let actions = runner.actions.lock().expect("actions");
+        assert_eq!(actions.len(), 1);
+        assert!(
+            matches!(&actions[0], crate::system::MockAction::Command { binary, .. } if binary == "systemd-run")
+        );
+        drop(actions);
+        assert!(
+            execute_isolated_command(&runner, "fixture-command", "/home/p_alice/project", 0, None)
+                .is_err()
+        );
+        assert_eq!(runner.actions.lock().expect("actions").len(), 1);
+    }
 
     #[test]
     fn test_generate_deploy_key_lifecycle() {
@@ -688,6 +910,18 @@ mod tests {
     fn test_execute_git_deploy_and_rollback() {
         let runner = MockSystemRunner::new();
         let base_dir = "/home/p_alice/sites/example.com";
+        runner.set_response(
+            "getent passwd p_alice",
+            0,
+            b"p_alice:x:10001:10001::/home/p_alice:/bin/bash\n",
+            b"",
+        );
+        runner.set_response(
+            "runuser",
+            0,
+            b"abc123456789\nJohn Doe <john@example.com>\nfeat: add awesome feature\n",
+            b"",
+        );
 
         // Setup mock response for git log
         runner.set_response(
@@ -722,10 +956,36 @@ mod tests {
         assert_eq!(deploy_res.commit_message, "feat: add awesome feature");
         assert!(deploy_res.current_symlink_target.ends_with("dist"));
 
-        // Check symlink was created and moved
+        // All repository and filesystem actions must execute after dropping UID.
+        let commands = runner
+            .actions
+            .lock()
+            .expect("actions")
+            .iter()
+            .filter_map(|action| match action {
+                crate::system::MockAction::Command { binary, args } => {
+                    Some((binary.clone(), args.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            commands
+                .iter()
+                .all(|(binary, _)| ["getent", "runuser", "systemd-run"].contains(&binary.as_str()))
+        );
+        assert!(commands.iter().any(|(binary, args)| binary == "runuser"
+            && args.starts_with(&["-u".into(), "p_alice".into(), "--".into()])
+            && args.iter().any(|arg| arg == "/usr/bin/mv")));
         let current_path = Path::new(base_dir).join("current");
-        let active_link = runner.read_link(&current_path).expect("read symlink");
-        assert!(active_link.to_string_lossy().contains("rel_001"));
+        runner
+            .create_dir_all(
+                &Path::new(base_dir).join("releases/rel_001"),
+                0o755,
+                10001,
+                10001,
+            )
+            .expect("fixture release");
 
         // Deploy release 2
         runner.set_response(
@@ -739,9 +999,13 @@ mod tests {
         let deploy_res2 = execute_git_deploy(&runner, &deploy_req2).expect("deploy rel 2");
         assert!(deploy_res2.success);
 
-        // Check active link now points to rel_002
-        let active_link2 = runner.read_link(&current_path).expect("read symlink 2");
-        assert!(active_link2.to_string_lossy().contains("rel_002"));
+        // Seed read-only metadata explicitly; command mocks never run ln/mv.
+        runner
+            .create_symlink(
+                &Path::new(base_dir).join("releases/rel_002/dist"),
+                &current_path,
+            )
+            .expect("fixture active release");
 
         // List releases
         let list_res = list_git_releases(
@@ -764,10 +1028,11 @@ mod tests {
         let rollback_res = execute_git_rollback(&runner, &rollback_req).expect("rollback success");
         assert!(rollback_res.success);
 
-        // Verify active link repointed back to rel_001
-        let rolled_back_link = runner
-            .read_link(&current_path)
-            .expect("read rolled back link");
-        assert!(rolled_back_link.to_string_lossy().contains("rel_001"));
+        assert!(rollback_res.current_symlink_target.contains("rel_001"));
+        let mut invalid = rollback_req.clone();
+        invalid.target_release_id = "../../escape".into();
+        runner.actions.lock().expect("actions").clear();
+        assert!(execute_git_rollback(&runner, &invalid).is_err());
+        assert!(runner.actions.lock().expect("actions").is_empty());
     }
 }

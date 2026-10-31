@@ -2,8 +2,9 @@
 
 use axum::{
     Json,
-    extract::FromRequestParts,
+    extract::{FromRequestParts, Request, State},
     http::{HeaderMap, StatusCode, request::Parts},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use panel_core::CoreError;
@@ -16,6 +17,54 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::csrf::{CSRF_HEADER_NAME, generate_csrf_token, verify_csrf_token};
 use super::session::extract_session_token;
 use crate::routes::AppState;
+
+/// Default-deny boundary for the API, including legacy handlers that predate the
+/// CSRF extractors. Public entrypoints have their own credential verification.
+pub async fn api_security_boundary(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with("/api/v1/") {
+        return next.run(request).await;
+    }
+    let public_post = request.method() == axum::http::Method::POST
+        && (matches!(
+            path,
+            "/api/v1/auth/login" | "/api/v1/auth/setup" | "/api/v1/auth/setup/validate"
+        ) || path
+            .strip_prefix("/api/v1/webhooks/deploy/")
+            .is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0)));
+    if public_post {
+        return next.run(request).await;
+    }
+    // These HTML tools use their own form CSRF tokens. The gateway still
+    // authenticates, checks the database owner and validates browser origin.
+    let database_tool = path.strip_prefix("/api/v1/databases/").is_some_and(|rest| {
+        rest.split_once('/').is_some_and(|(id, rest)| {
+            id.parse::<i64>().is_ok_and(|id| id > 0) && rest.starts_with("web/")
+        })
+    });
+    let safe = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let (mut parts, body) = request.into_parts();
+    let result = if safe || database_tool {
+        RequireAuth::from_request_parts(&mut parts, &state)
+            .await
+            .map(|_| ())
+    } else {
+        RequireCsrf::from_request_parts(&mut parts, &state)
+            .await
+            .map(|_| ())
+    };
+    match result {
+        Ok(()) => next.run(Request::from_parts(parts, body)).await,
+        Err(response) => response,
+    }
+}
 
 /// Represents a verified authenticated user in a request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
